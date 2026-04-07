@@ -33,10 +33,15 @@ std::string SanitizeDeviceIdFromVideoBuffers(const char* name, const char* guid)
 }  // namespace
 
 FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
-  base_->audio_device_->OnDeviceChange([&] {
+  // Capture `base` by value (pointer copy) instead of `[&]` (raw `this`).
+  // The original `[&]` capture causes use-after-free on Windows when
+  // OnDeviceChange fires after FlutterMediaStream is destroyed — the lambda
+  // would dereference the dead `this` to reach `base_`.
+  // See: https://github.com/flutter/flutter/issues/118611
+  base_->audio_device_->OnDeviceChange([base] {
     EncodableMap info;
     info[EncodableValue("event")] = "onDeviceChange";
-    base_->event_channel()->Success(EncodableValue(info), false);
+    base->event_channel()->Success(EncodableValue(info), false);
   });
 }
 
