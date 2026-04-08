@@ -293,11 +293,11 @@ class RTCPeerConnectionNative extends RTCPeerConnection {
 
   @override
   Future<void> dispose() async {
-    try {
-      await _eventSubscription?.cancel();
-    } catch (_) {
-      // Native handler may already be destroyed — ignore MissingPluginException.
-    }
+    // Don't cancel the stream subscription — the native EventChannel handler
+    // may already be destroyed, and Flutter reports MissingPluginException
+    // via FlutterError.onError (uncatchable). peerConnectionDispose cleans
+    // up everything on the native side; the Dart subscription is GC'd.
+    _eventSubscription = null;
     await WebRTC.invokeMethod(
       'peerConnectionDispose',
       <String, dynamic>{'peerConnectionId': _peerConnectionId},
