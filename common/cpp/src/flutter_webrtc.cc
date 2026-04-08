@@ -19,7 +19,13 @@ FlutterWebRTC::FlutterWebRTC(FlutterWebRTCPlugin* plugin)
       FlutterFrameCryptor::FlutterFrameCryptor(this),
       FlutterDataPacketCryptor::FlutterDataPacketCryptor(this) {}
 
-FlutterWebRTC::~FlutterWebRTC() {}
+FlutterWebRTC::~FlutterWebRTC() {
+  // Clear the global logger sink to prevent use-after-free:
+  // the log callback references eventChannelProxy which becomes dangling
+  // after this object is destroyed.
+  libwebrtc::LibWebRTCLogging::removeLogSink();
+  eventChannelProxy = nullptr;
+}
 
 void FlutterWebRTC::HandleMethodCall(
     const MethodCallProxy& method_call,
@@ -1305,6 +1311,7 @@ void FlutterWebRTC::initLoggerCallback(RTCLoggingSeverity severity) {
   }
 
   libwebrtc::LibWebRTCLogging::setLogSink(severity, [](const string& message) {
+    if (eventChannelProxy == nullptr) return;
     EncodableMap info;
     info[EncodableValue("event")] = "onLogData";
     info[EncodableValue("data")] = message.c_string();

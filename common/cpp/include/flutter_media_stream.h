@@ -1,6 +1,8 @@
 #ifndef FLUTTER_WEBRTC_RTC_GET_USERMEDIA_HXX
 #define FLUTTER_WEBRTC_RTC_GET_USERMEDIA_HXX
 
+#include <atomic>
+
 #include "flutter_common.h"
 #include "flutter_webrtc_base.h"
 
@@ -9,6 +11,7 @@ namespace flutter_webrtc_plugin {
 class FlutterMediaStream {
  public:
   FlutterMediaStream(FlutterWebRTCBase* base);
+  ~FlutterMediaStream();
 
   void GetUserMedia(const EncodableMap& constraints,
                     std::unique_ptr<MethodResultProxy> result);
@@ -50,6 +53,8 @@ class FlutterMediaStream {
 
  private:
   FlutterWebRTCBase* base_;
+  std::shared_ptr<std::atomic<bool>> alive_ =
+      std::make_shared<std::atomic<bool>>(true);
 };
 
 }  // namespace flutter_webrtc_plugin
