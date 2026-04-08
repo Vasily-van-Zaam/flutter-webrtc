@@ -31,11 +31,28 @@ std::string SanitizeDeviceIdFromVideoBuffers(const char* name, const char* guid)
 }  // namespace
 
 FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
-  base_->audio_device_->OnDeviceChange([&] {
+  // Guard against use-after-free: Windows audio subsystem can fire
+  // OnDeviceChange from a thread pool thread after FlutterMediaStream
+  // is destroyed. We use a weak_ptr to an atomic<bool> flag that the
+  // destructor sets to false before any members are released.
+  // See: https://github.com/flutter/flutter/issues/118611
+  std::weak_ptr<std::atomic<bool>> weak_alive = alive_;
+  base_->audio_device_->OnDeviceChange([base, weak_alive] {
+    auto guard = weak_alive.lock();
+    if (!guard || !guard->load()) return;
     EncodableMap info;
     info[EncodableValue("event")] = "onDeviceChange";
-    base_->event_channel()->Success(EncodableValue(info), false);
+    base->event_channel()->Success(EncodableValue(info), false);
   });
+}
+
+FlutterMediaStream::~FlutterMediaStream() {
+  // Mark as dead before any member destruction. The OnDeviceChange callback
+  // (which may fire from a Windows thread pool thread at any time) checks
+  // this flag and will no-op if the object is being destroyed.
+  alive_->store(false);
+  // Unregister the callback so Windows stops delivering notifications.
+  base_->audio_device_->OnDeviceChange(nullptr);
 }
 
 void FlutterMediaStream::GetUserMedia(
