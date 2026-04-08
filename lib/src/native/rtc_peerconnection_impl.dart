@@ -293,7 +293,11 @@ class RTCPeerConnectionNative extends RTCPeerConnection {
 
   @override
   Future<void> dispose() async {
-    await _eventSubscription?.cancel();
+    try {
+      await _eventSubscription?.cancel();
+    } catch (_) {
+      // Native handler may already be destroyed — ignore MissingPluginException.
+    }
     await WebRTC.invokeMethod(
       'peerConnectionDispose',
       <String, dynamic>{'peerConnectionId': _peerConnectionId},
