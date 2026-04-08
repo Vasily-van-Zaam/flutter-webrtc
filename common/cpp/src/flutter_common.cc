@@ -1,5 +1,7 @@
 #include "flutter_common.h"
 
+#include <atomic>
+
 class MethodCallProxyImpl : public MethodCallProxy {
  public:
   explicit MethodCallProxyImpl(const MethodCall& method_call)
@@ -72,12 +74,18 @@ class EventChannelProxyImpl : public EventChannelProxy {
       : channel_(std::make_unique<EventChannel>(
             messenger,
             channelName,
-            &flutter::StandardMethodCodec::GetInstance())) {
+            &flutter::StandardMethodCodec::GetInstance())),
+        alive_(std::make_shared<std::atomic<bool>>(true)) {
+    std::weak_ptr<std::atomic<bool>> weak_alive = alive_;
+
     auto handler = std::make_unique<
         flutter::StreamHandlerFunctions<EncodableValue>>(
-        [&](const EncodableValue* arguments,
+        [this, weak_alive](
+            const EncodableValue* arguments,
             std::unique_ptr<flutter::EventSink<EncodableValue>>&& events)
             -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+          auto guard = weak_alive.lock();
+          if (!guard || !guard->load()) return nullptr;
           sink_ = std::move(events);
           for (auto& event : event_queue_) {
             sink_->Success(event);
@@ -86,16 +94,25 @@ class EventChannelProxyImpl : public EventChannelProxy {
           on_listen_called_ = true;
           return nullptr;
         },
-        [&](const EncodableValue* arguments)
+        [this, weak_alive](const EncodableValue* arguments)
             -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+          auto guard = weak_alive.lock();
+          if (!guard || !guard->load()) return nullptr;
           on_listen_called_ = false;
+          sink_.reset();
           return nullptr;
         });
 
     channel_->SetStreamHandler(std::move(handler));
   }
 
-  virtual ~EventChannelProxyImpl() {}
+  virtual ~EventChannelProxyImpl() {
+    if (alive_) {
+      alive_->store(false);
+    }
+    // Unregister handler so Flutter messenger won't call into freed memory.
+    channel_->SetStreamHandler(nullptr);
+  }
 
   void Success(const EncodableValue& event, bool cache_event = true) override {
     if (on_listen_called_) {
@@ -108,6 +125,9 @@ class EventChannelProxyImpl : public EventChannelProxy {
   }
 
  private:
+  // alive_ MUST be declared before channel_ so it is destroyed AFTER channel_.
+  // channel_ destructor may trigger OnCancel which checks alive_.
+  std::shared_ptr<std::atomic<bool>> alive_;
   std::unique_ptr<EventChannel> channel_;
   std::unique_ptr<EventSink> sink_;
   std::list<EncodableValue> event_queue_;
