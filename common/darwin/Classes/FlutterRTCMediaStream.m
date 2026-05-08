@@ -159,7 +159,15 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   }
 
 #if !defined(TARGET_OS_IPHONE)
-  if (audioDeviceId != nil) {
+  // ВАЖНО: НЕ вызываем `selectAudioInput:` если deviceId пустой.
+  // Иначе ADM ищет совпадение в inputDevices, не находит, идёт по
+  // error-path; сам факт обращения к ADM может быть disruptive на
+  // cold start. Кроме того, `setInputDevice:` на macOS внутри
+  // libwebrtc меняет CoreAudio HAL system-wide default microphone —
+  // в Dart-слое мы намеренно не передаём deviceId на macOS, но
+  // защищаемся ещё и здесь на случай прихода пустой строки от
+  // других callers.
+  if (audioDeviceId != nil && audioDeviceId.length > 0) {
     [self selectAudioInput:audioDeviceId result:nil];
   }
 #endif
@@ -890,32 +898,52 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
                                             scope:kAudioDevicePropertyScopeOutput
                                              kind:@"audiooutput"];
 
-  // Дописываем ADM-устройства которые HAL пропустил (по deviceId).
-  NSMutableSet<NSString*>* seenInputIds = [NSMutableSet set];
-  NSMutableSet<NSString*>* seenOutputIds = [NSMutableSet set];
+  // Дописываем ADM-устройства которые HAL пропустил.
+  //
+  // ВАЖНО: ADM использует свои внутренние числовые id ("147", "153"),
+  // а HAL — CoreAudio UID ("40-B3-FA-74-7F-22:input"). Для одного и
+  // того же физического устройства эти id РАЗНЫЕ — поэтому дедуп по
+  // `deviceId` оставляет дубли. Дедупим по нормализованному label.
+  //
+  // Также пропускаем ADM-aliases с label "Default" / "default - ..." —
+  // это синонимы default-устройства, а не отдельные единицы железа.
+  // Они появляются после первой инициализации peer connection.
+  NSMutableSet<NSString*>* seenInputLabels = [NSMutableSet set];
+  NSMutableSet<NSString*>* seenOutputLabels = [NSMutableSet set];
+  NSCharacterSet* trimSet = [NSCharacterSet whitespaceAndNewlineCharacterSet];
   for (NSDictionary* d in sources) {
     NSString* kind = d[@"kind"];
-    NSString* did = d[@"deviceId"];
-    if ([kind isEqualToString:@"audioinput"]) [seenInputIds addObject:did];
-    else if ([kind isEqualToString:@"audiooutput"]) [seenOutputIds addObject:did];
+    NSString* label = d[@"label"] ?: @"";
+    label = [[label stringByTrimmingCharactersInSet:trimSet] lowercaseString];
+    if (label.length == 0) continue;
+    if ([kind isEqualToString:@"audioinput"]) [seenInputLabels addObject:label];
+    else if ([kind isEqualToString:@"audiooutput"]) [seenOutputLabels addObject:label];
   }
   for (RTCIODevice* device in [audioDeviceModule inputDevices]) {
-    if (![seenInputIds containsObject:device.deviceId]) {
-      [sources addObject:@{
-        @"deviceId" : device.deviceId,
-        @"label" : device.name,
-        @"kind" : @"audioinput",
-      }];
-    }
+    NSString* normLabel =
+        [[(device.name ?: @"") stringByTrimmingCharactersInSet:trimSet] lowercaseString];
+    if (normLabel.length == 0) continue;
+    if ([normLabel hasPrefix:@"default"]) continue;
+    if ([seenInputLabels containsObject:normLabel]) continue;
+    [seenInputLabels addObject:normLabel];
+    [sources addObject:@{
+      @"deviceId" : device.deviceId,
+      @"label" : device.name,
+      @"kind" : @"audioinput",
+    }];
   }
   for (RTCIODevice* device in [audioDeviceModule outputDevices]) {
-    if (![seenOutputIds containsObject:device.deviceId]) {
-      [sources addObject:@{
-        @"deviceId" : device.deviceId,
-        @"label" : device.name,
-        @"kind" : @"audiooutput",
-      }];
-    }
+    NSString* normLabel =
+        [[(device.name ?: @"") stringByTrimmingCharactersInSet:trimSet] lowercaseString];
+    if (normLabel.length == 0) continue;
+    if ([normLabel hasPrefix:@"default"]) continue;
+    if ([seenOutputLabels containsObject:normLabel]) continue;
+    [seenOutputLabels addObject:normLabel];
+    [sources addObject:@{
+      @"deviceId" : device.deviceId,
+      @"label" : device.name,
+      @"kind" : @"audiooutput",
+    }];
   }
 #endif
   result(@{@"sources" : sources});
