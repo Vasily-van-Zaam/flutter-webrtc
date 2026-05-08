@@ -7,6 +7,14 @@
 #import "VideoProcessingAdapter.h"
 #import "LocalVideoTrack.h"
 #import "LocalAudioTrack.h"
+#if TARGET_OS_OSX
+#import <CoreAudio/CoreAudio.h>
+// `kAudioObjectPropertyElementMain` появилось в macOS 12 SDK. Для
+// сборки на более старых SDK используем `kAudioObjectPropertyElementMaster`.
+#if !defined(kAudioObjectPropertyElementMain)
+#define kAudioObjectPropertyElementMain kAudioObjectPropertyElementMaster
+#endif
+#endif
 
 @implementation RTCMediaStreamTrack (Flutter)
 
@@ -681,6 +689,149 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   result(@{@"streamId" : [mediaStream streamId]});
 }
 
+#if TARGET_OS_OSX
+/// Перечислить audio-устройства указанного scope (input/output) через
+/// CoreAudio HAL и добавить их в `sources`. Используется как fallback
+/// когда `RTCAudioDeviceModule` не отдаёт devices (cold start, ADM
+/// ленивая инициализация). HAL видит ВСЕ системные audio-устройства
+/// независимо от текущего state AVFoundation, включая Bluetooth-
+/// гарнитуры в A2DP-режиме (которые `AVCaptureDevice` пропускает).
+- (void)enumerateMacOSCoreAudioDevicesIntoSources:(NSMutableArray*)sources
+                                            scope:(AudioObjectPropertyScope)scope
+                                             kind:(NSString*)kind {
+  AudioObjectPropertyAddress devListAddr = {
+    kAudioHardwarePropertyDevices,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+  };
+  UInt32 dataSize = 0;
+  OSStatus status = AudioObjectGetPropertyDataSize(
+      kAudioObjectSystemObject, &devListAddr, 0, NULL, &dataSize);
+  if (status != noErr || dataSize == 0) return;
+
+  UInt32 deviceCount = dataSize / sizeof(AudioDeviceID);
+  AudioDeviceID* deviceIDs = (AudioDeviceID*)malloc(dataSize);
+  status = AudioObjectGetPropertyData(
+      kAudioObjectSystemObject, &devListAddr, 0, NULL,
+      &dataSize, deviceIDs);
+  if (status != noErr) {
+    free(deviceIDs);
+    return;
+  }
+
+  for (UInt32 i = 0; i < deviceCount; i++) {
+    AudioDeviceID deviceID = deviceIDs[i];
+
+    // Считаем количество каналов в нужном scope (input/output).
+    AudioObjectPropertyAddress streamAddr = {
+      kAudioDevicePropertyStreamConfiguration,
+      scope,
+      kAudioObjectPropertyElementMain
+    };
+    UInt32 streamSize = 0;
+    UInt32 channelCount = 0;
+    if (AudioObjectGetPropertyDataSize(
+            deviceID, &streamAddr, 0, NULL, &streamSize) == noErr
+        && streamSize > 0) {
+      AudioBufferList* bufferList = (AudioBufferList*)malloc(streamSize);
+      if (AudioObjectGetPropertyData(
+              deviceID, &streamAddr, 0, NULL, &streamSize, bufferList)
+              == noErr) {
+        for (UInt32 b = 0; b < bufferList->mNumberBuffers; b++) {
+          channelCount += bufferList->mBuffers[b].mNumberChannels;
+        }
+      }
+      free(bufferList);
+    }
+
+    // Bluetooth-гарнитуры (AirPods и т.п.) могут показывать 0 input
+    // channels пока они в A2DP-профиле (только output / стерео-музыка).
+    // При запросе mic'а через getUserMedia macOS автоматически
+    // переключит их в HFP/HSP с микрофоном. Поэтому для Bluetooth-
+    // устройств добавляем их в input список даже когда channelCount=0,
+    // если у них есть output channels (== доказательство что устройство
+    // вообще существует и работает).
+    BOOL isBluetooth = NO;
+    if (channelCount == 0 &&
+        scope == kAudioDevicePropertyScopeInput) {
+      AudioObjectPropertyAddress transportAddr = {
+        kAudioDevicePropertyTransportType,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+      };
+      UInt32 transportType = 0;
+      UInt32 transportSize = sizeof(transportType);
+      if (AudioObjectGetPropertyData(deviceID, &transportAddr, 0, NULL,
+                                     &transportSize, &transportType) == noErr
+          && transportType == kAudioDeviceTransportTypeBluetooth) {
+        // Проверяем, что у Bluetooth-устройства есть output channels —
+        // т.е. это headset/гарнитура, а не сторонний неподключённый
+        // device record.
+        AudioObjectPropertyAddress outAddr = {
+          kAudioDevicePropertyStreamConfiguration,
+          kAudioDevicePropertyScopeOutput,
+          kAudioObjectPropertyElementMain
+        };
+        UInt32 outSize = 0;
+        UInt32 outChannels = 0;
+        if (AudioObjectGetPropertyDataSize(
+                deviceID, &outAddr, 0, NULL, &outSize) == noErr
+            && outSize > 0) {
+          AudioBufferList* outBuf = (AudioBufferList*)malloc(outSize);
+          if (AudioObjectGetPropertyData(
+                  deviceID, &outAddr, 0, NULL, &outSize, outBuf) == noErr) {
+            for (UInt32 b = 0; b < outBuf->mNumberBuffers; b++) {
+              outChannels += outBuf->mBuffers[b].mNumberChannels;
+            }
+          }
+          free(outBuf);
+        }
+        if (outChannels > 0) {
+          isBluetooth = YES;
+        }
+      }
+    }
+    if (channelCount == 0 && !isBluetooth) continue;
+
+    // Имя и UID устройства.
+    CFStringRef nameRef = NULL;
+    UInt32 nameSize = sizeof(nameRef);
+    AudioObjectPropertyAddress nameAddr = {
+      kAudioObjectPropertyName,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain
+    };
+    NSString* name = nil;
+    if (AudioObjectGetPropertyData(deviceID, &nameAddr, 0, NULL,
+                                   &nameSize, &nameRef) == noErr
+        && nameRef != NULL) {
+      name = (__bridge_transfer NSString*)nameRef;
+    }
+
+    CFStringRef uidRef = NULL;
+    UInt32 uidSize = sizeof(uidRef);
+    AudioObjectPropertyAddress uidAddr = {
+      kAudioDevicePropertyDeviceUID,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain
+    };
+    NSString* uid = nil;
+    if (AudioObjectGetPropertyData(deviceID, &uidAddr, 0, NULL,
+                                   &uidSize, &uidRef) == noErr
+        && uidRef != NULL) {
+      uid = (__bridge_transfer NSString*)uidRef;
+    }
+
+    [sources addObject:@{
+      @"deviceId" : uid ?: [NSString stringWithFormat:@"%u", (unsigned)deviceID],
+      @"label" : name ?: @"",
+      @"kind" : kind,
+    }];
+  }
+  free(deviceIDs);
+}
+#endif
+
 - (void)getSources:(FlutterResult)result {
   NSMutableArray* sources = [NSMutableArray array];
   NSArray* videoDevices =  [self captureDevices];
@@ -726,22 +877,45 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 #if TARGET_OS_OSX
   RTCAudioDeviceModule* audioDeviceModule = [self.peerConnectionFactory audioDeviceModule];
 
-  NSArray* inputDevices = [audioDeviceModule inputDevices];
-  for (RTCIODevice* device in inputDevices) {
-    [sources addObject:@{
-      @"deviceId" : device.deviceId,
-      @"label" : device.name,
-      @"kind" : @"audioinput",
-    }];
-  }
+  // На macOS CoreAudio HAL — наиболее полный источник info об audio
+  // устройствах. ADM (`audioDeviceModule.inputDevices/outputDevices`)
+  // часто пуст до peer connection init и пропускает Bluetooth-
+  // гарнитуры в A2DP-режиме. Поэтому всегда используем HAL для
+  // основного списка, а ADM-результаты добавляем сверху как
+  // дополнительные (вдруг там есть устройства которых HAL не показал).
+  [self enumerateMacOSCoreAudioDevicesIntoSources:sources
+                                            scope:kAudioDevicePropertyScopeInput
+                                             kind:@"audioinput"];
+  [self enumerateMacOSCoreAudioDevicesIntoSources:sources
+                                            scope:kAudioDevicePropertyScopeOutput
+                                             kind:@"audiooutput"];
 
-  NSArray* outputDevices = [audioDeviceModule outputDevices];
-  for (RTCIODevice* device in outputDevices) {
-    [sources addObject:@{
-      @"deviceId" : device.deviceId,
-      @"label" : device.name,
-      @"kind" : @"audiooutput",
-    }];
+  // Дописываем ADM-устройства которые HAL пропустил (по deviceId).
+  NSMutableSet<NSString*>* seenInputIds = [NSMutableSet set];
+  NSMutableSet<NSString*>* seenOutputIds = [NSMutableSet set];
+  for (NSDictionary* d in sources) {
+    NSString* kind = d[@"kind"];
+    NSString* did = d[@"deviceId"];
+    if ([kind isEqualToString:@"audioinput"]) [seenInputIds addObject:did];
+    else if ([kind isEqualToString:@"audiooutput"]) [seenOutputIds addObject:did];
+  }
+  for (RTCIODevice* device in [audioDeviceModule inputDevices]) {
+    if (![seenInputIds containsObject:device.deviceId]) {
+      [sources addObject:@{
+        @"deviceId" : device.deviceId,
+        @"label" : device.name,
+        @"kind" : @"audioinput",
+      }];
+    }
+  }
+  for (RTCIODevice* device in [audioDeviceModule outputDevices]) {
+    if (![seenOutputIds containsObject:device.deviceId]) {
+      [sources addObject:@{
+        @"deviceId" : device.deviceId,
+        @"label" : device.name,
+        @"kind" : @"audiooutput",
+      }];
+    }
   }
 #endif
   result(@{@"sources" : sources});
