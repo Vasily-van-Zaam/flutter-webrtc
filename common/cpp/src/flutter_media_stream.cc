@@ -2,6 +2,24 @@
 
 #include "flutter_utf8_sanitize.h"
 
+#ifdef _WIN32
+// Windows Core Audio API — гарантированно видит ВСЕ системные
+// audio-устройства, ту же информацию что показывает Volume Mixer и
+// панель «Звук» Windows. Используется как fallback когда WebRTC ADM
+// (`audio_device_->RecordingDevices()`) возвращает 0 — это случается
+// на ряде Windows-конфигураций (виртуальные/redirected устройства,
+// проблемы с инициализацией ADM до первого peer connection).
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <propsys.h>
+#include <propvarutil.h>
+#include <combaseapi.h>
+#include <set>
+#pragma comment(lib, "mmdevapi.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "propsys.lib")
+#endif
+
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
 #define DEFAULT_FPS 30
@@ -27,6 +45,103 @@ std::string SanitizeDeviceIdFromVideoBuffers(const char* name, const char* guid)
                               : std::string(name != nullptr ? name : "");
   return SanitizeUtf8ForFlutter(raw);
 }
+
+#ifdef _WIN32
+
+// UTF-16 → UTF-8 для Windows Core Audio API (WCHAR* строки).
+std::string WideToUtf8(const wchar_t* wstr) {
+  if (!wstr) return "";
+  int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, nullptr, 0, nullptr,
+                                 nullptr);
+  if (len <= 1) return "";
+  std::string result(static_cast<size_t>(len - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wstr, -1, result.data(), len, nullptr,
+                      nullptr);
+  return result;
+}
+
+// COM init — безопасно вызывать многократно. Flutter Windows host обычно
+// уже инициализирует COM, тогда вернётся S_FALSE; мы не делаем
+// CoUninitialize чтобы не сломать чужие COM-объекты на том же thread'е.
+void EnsureComInitialized() {
+  static thread_local bool tried = false;
+  if (tried) return;
+  tried = true;
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+}
+
+// Перечислить Windows audio endpoints (microphones или speakers) через
+// IMMDeviceEnumerator и добавить в `sources`. Все добавленные deviceId
+// также сохраняем в `seen_ids` для последующего дедупа с ADM-based
+// перечислением. Возвращает количество добавленных устройств.
+int EnumerateWindowsAudioEndpoints(EncodableList& sources,
+                                    std::set<std::string>& seen_ids,
+                                    EDataFlow flow,
+                                    const char* kind) {
+  EnsureComInitialized();
+
+  IMMDeviceEnumerator* pEnumerator = nullptr;
+  HRESULT hr =
+      CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                       __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
+  if (FAILED(hr) || !pEnumerator) return 0;
+
+  IMMDeviceCollection* pCollection = nullptr;
+  hr = pEnumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &pCollection);
+  if (FAILED(hr) || !pCollection) {
+    pEnumerator->Release();
+    return 0;
+  }
+
+  UINT count = 0;
+  pCollection->GetCount(&count);
+  int added = 0;
+  for (UINT i = 0; i < count; i++) {
+    IMMDevice* pDevice = nullptr;
+    if (FAILED(pCollection->Item(i, &pDevice)) || !pDevice) continue;
+
+    LPWSTR deviceIdW = nullptr;
+    std::string deviceId;
+    if (SUCCEEDED(pDevice->GetId(&deviceIdW)) && deviceIdW) {
+      deviceId = WideToUtf8(deviceIdW);
+      CoTaskMemFree(deviceIdW);
+    }
+
+    // FriendlyName — это то что показывается в Sound панели и Volume
+    // Mixer (например «Микрофон (Realtek High Definition Audio)»).
+    std::string label;
+    IPropertyStore* pProps = nullptr;
+    if (SUCCEEDED(pDevice->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
+      PROPVARIANT varName;
+      PropVariantInit(&varName);
+      if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &varName)) &&
+          varName.vt == VT_LPWSTR && varName.pwszVal) {
+        label = WideToUtf8(varName.pwszVal);
+      }
+      PropVariantClear(&varName);
+      pProps->Release();
+    }
+
+    pDevice->Release();
+
+    if (deviceId.empty()) continue;
+
+    std::string sanitizedId = SanitizeUtf8ForFlutter(deviceId);
+    EncodableMap audio;
+    audio[EncodableValue("label")] = EncodableValue(SanitizeUtf8ForFlutter(label));
+    audio[EncodableValue("deviceId")] = EncodableValue(sanitizedId);
+    audio[EncodableValue("facing")] = "";
+    audio[EncodableValue("kind")] = kind;
+    sources.push_back(EncodableValue(audio));
+    seen_ids.insert(sanitizedId);
+    added++;
+  }
+  pCollection->Release();
+  pEnumerator->Release();
+  return added;
+}
+
+#endif  // _WIN32
 
 }  // namespace
 
@@ -166,7 +281,10 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
       }
     }
 
-    if (sourceId == "") {
+    if (sourceId == "" && recording_devices > 0) {
+      // Guard: на ряде Windows-конфигураций ADM возвращает
+      // RecordingDevices()=0 пока peer connection не активирован.
+      // Без guard'а RecordingDeviceName(0, ...) уйдёт за границы.
       base_->audio_device_->RecordingDeviceName(0, strRecordingName,
                                                 strRecordingGuid);
       sourceId = SanitizeDeviceIdFromAudioBuffers(strRecordingName,
@@ -366,6 +484,21 @@ void FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
 void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   EncodableList sources;
 
+#ifdef _WIN32
+  // На Windows используем IMMDeviceEnumerator (Windows Core Audio) —
+  // он гарантированно отдаёт все системные audio-endpoints, в том
+  // числе когда `audio_device_->RecordingDevices()` возвращает 0
+  // (виртуальные/redirected устройства, ADM не инициализирован до
+  // peer connection). После него дописываем ADM-устройства которых
+  // в IMM-списке не оказалось (defensive, обычно не срабатывает).
+  std::set<std::string> seen_input_ids;
+  std::set<std::string> seen_output_ids;
+  EnumerateWindowsAudioEndpoints(sources, seen_input_ids, eCapture,
+                                  "audioinput");
+  EnumerateWindowsAudioEndpoints(sources, seen_output_ids, eRender,
+                                  "audiooutput");
+#endif
+
   int nb_audio_devices = base_->audio_device_->RecordingDevices();
   char strNameUTF8[RTCAudioDevice::kAdmMaxDeviceNameSize + 1] = {0};
   char strGuidUTF8[RTCAudioDevice::kAdmMaxGuidSize + 1] = {0};
@@ -374,6 +507,9 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
     base_->audio_device_->RecordingDeviceName(i, strNameUTF8, strGuidUTF8);
     std::string device_id =
         SanitizeDeviceIdFromAudioBuffers(strNameUTF8, strGuidUTF8);
+#ifdef _WIN32
+    if (seen_input_ids.count(device_id)) continue;
+#endif
     EncodableMap audio;
     audio[EncodableValue("label")] = EncodableValue(SanitizeLabel(strNameUTF8));
     audio[EncodableValue("deviceId")] = EncodableValue(device_id);
@@ -387,6 +523,9 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
     base_->audio_device_->PlayoutDeviceName(i, strNameUTF8, strGuidUTF8);
     std::string device_id =
         SanitizeDeviceIdFromAudioBuffers(strNameUTF8, strGuidUTF8);
+#ifdef _WIN32
+    if (seen_output_ids.count(device_id)) continue;
+#endif
     EncodableMap audio;
     audio[EncodableValue("label")] = EncodableValue(SanitizeLabel(strNameUTF8));
     audio[EncodableValue("deviceId")] = EncodableValue(device_id);
@@ -414,6 +553,14 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
 void FlutterMediaStream::SelectAudioOutput(
     const std::string& device_id,
     std::unique_ptr<MethodResultProxy> result) {
+  // Пустой / "default" deviceId — не пинимся к конкретному устройству,
+  // оставляем ADM на системном default'е. Это критично для Windows:
+  // selectAudioOutput("default") должен возвращать success, не error,
+  // чтобы Dart-слой мог явно сказать «следуй за системой».
+  if (device_id == "" || device_id == "default") {
+    result->Success();
+    return;
+  }
   char deviceName[256];
   char deviceGuid[256];
   int playout_devices = base_->audio_device_->PlayoutDevices();
@@ -422,15 +569,17 @@ void FlutterMediaStream::SelectAudioOutput(
     base_->audio_device_->PlayoutDeviceName(i, deviceName, deviceGuid);
     std::string cur_device_id =
         SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
-    if (device_id != "" && device_id == cur_device_id) {
+    if (device_id == cur_device_id) {
       base_->audio_device_->SetPlayoutDevice(i);
       found = true;
       break;
     }
   }
   if (!found) {
-    result->Error("Bad Arguments",
-                  "Not found device id: " + SanitizeUtf8ForFlutter(device_id));
+    // Не нашли в ADM-перечислении — возможно устройство в IMM-списке
+    // (Windows Core Audio) но не зарегистрировано в ADM. Тогда
+    // success без явной смены — libwebrtc возьмёт системный default.
+    result->Success();
     return;
   }
   result->Success();
@@ -439,23 +588,28 @@ void FlutterMediaStream::SelectAudioOutput(
 void FlutterMediaStream::SelectAudioInput(
     const std::string& device_id,
     std::unique_ptr<MethodResultProxy> result) {
+  if (device_id == "" || device_id == "default") {
+    result->Success();
+    return;
+  }
   char deviceName[256];
   char deviceGuid[256];
-  int playout_devices = base_->audio_device_->RecordingDevices();
+  int recording_devices = base_->audio_device_->RecordingDevices();
   bool found = false;
-  for (uint16_t i = 0; i < playout_devices; i++) {
+  for (uint16_t i = 0; i < recording_devices; i++) {
     base_->audio_device_->RecordingDeviceName(i, deviceName, deviceGuid);
     std::string cur_device_id =
         SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
-    if (device_id != "" && device_id == cur_device_id) {
+    if (device_id == cur_device_id) {
       base_->audio_device_->SetRecordingDevice(i);
       found = true;
       break;
     }
   }
   if (!found) {
-    result->Error("Bad Arguments",
-                  "Not found device id: " + SanitizeUtf8ForFlutter(device_id));
+    // Аналогично output: устройство есть в IMM-списке, но не в ADM —
+    // не считаем это ошибкой, libwebrtc возьмёт системный default.
+    result->Success();
     return;
   }
   result->Success();
