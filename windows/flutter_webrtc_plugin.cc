@@ -3,8 +3,10 @@
 #include "flutter_common.h"
 #include "flutter_webrtc.h"
 #include "task_runner_windows.h"
+#include "audio_session_naming.h"
 
 #include <flutter/plugin_registrar_windows.h>
+#include <string>
 
 const char* kChannelName = "FlutterWebRTC.Method";
 static flutter_webrtc_plugin::FlutterWebRTC* g_shared_instance = nullptr;
@@ -55,6 +57,37 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
   // Called when a method is called on |channel_|;
   void HandleMethodCall(const MethodCall& method_call,
                         std::unique_ptr<MethodResult> result) {
+    // Win-only расширение: переименование WASAPI-сессий процесса в
+    // Volume Mixer. Перехватываем ДО `FlutterWebRTC::HandleMethodCall`
+    // — общий код про этот метод не знает.
+    if (method_call.method_name().compare("setAudioSessionDisplayName") == 0) {
+      std::string utf8_name = "Synergy Call Center";
+      if (method_call.arguments() != nullptr &&
+          TypeIs<EncodableMap>(*method_call.arguments())) {
+        const auto& params = GetValue<EncodableMap>(*method_call.arguments());
+        std::string candidate = findString(params, "name");
+        if (!candidate.empty()) utf8_name = candidate;
+      }
+      // UTF-8 → UTF-16 без CRT-locale зависимости. WASAPI принимает
+      // только wide-string. На случай чистого ASCII (наш дефолт)
+      // конверсия тривиальная, но идентично работает и для кириллицы.
+      std::wstring display_name;
+      int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8_name.c_str(),
+                                     static_cast<int>(utf8_name.size()),
+                                     nullptr, 0);
+      if (wlen > 0) {
+        display_name.assign(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, utf8_name.c_str(),
+                            static_cast<int>(utf8_name.size()),
+                            &display_name[0], wlen);
+      } else {
+        display_name = L"Synergy Call Center";
+      }
+      int applied = SetAudioSessionDisplayName(display_name);
+      result->Success(EncodableValue(applied));
+      return;
+    }
+
     // handle method call and forward to webrtc native sdk.
     auto method_call_proxy = MethodCallProxy::Create(method_call);
     webrtc_->HandleMethodCall(*method_call_proxy.get(),
