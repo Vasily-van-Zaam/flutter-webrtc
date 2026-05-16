@@ -317,13 +317,21 @@ static FlutterWebRTCPlugin *sharedSingleton;
         // CoreAudio ADM requires explicit device initialization on macOS
         RTCAudioDeviceModule* audioDeviceModule = [_peerConnectionFactory audioDeviceModule];
         if (audioDeviceModule) {
+            // Подписываемся observer'ом: callback `audioDeviceModuleDidUpdateDevices:`
+            // — единственный способ узнать когда ADM наконец-то проенумерирует
+            // устройства (на старте они приходят пустыми, enumerate ленивый).
+            audioDeviceModule.observer = self;
+            NSLog(@"[FlutterWebRTC] ADM observer attached");
+
             NSArray* inputDevices = [audioDeviceModule inputDevices];
+            NSLog(@"[FlutterWebRTC] init: inputDevices.count=%lu", (unsigned long)inputDevices.count);
             if (inputDevices.count > 0) {
                 RTCIODevice* defaultInput = inputDevices[0];
                 [audioDeviceModule setInputDevice:defaultInput];
                 NSLog(@"CoreAudio ADM: Selected input device: %@", defaultInput.name);
             }
             NSArray* outputDevices = [audioDeviceModule outputDevices];
+            NSLog(@"[FlutterWebRTC] init: outputDevices.count=%lu", (unsigned long)outputDevices.count);
             if (outputDevices.count > 0) {
                 RTCIODevice* defaultOutput = outputDevices[0];
                 [audioDeviceModule setOutputDevice:defaultOutput];
@@ -439,11 +447,17 @@ static FlutterWebRTCPlugin *sharedSingleton;
   } else if ([@"selectAudioInput" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* deviceId = argsMap[@"deviceId"];
-    [self selectAudioInput:deviceId result:result];
+    NSString* label = argsMap[@"label"]; // optional, fallback-match for macOS
+    NSNumber* force = argsMap[@"forceTrySet"]; // optional, hot-swap input во время звонка
+    BOOL forceTrySet = (force != nil) && [force boolValue];
+    [self selectAudioInput:deviceId label:label forceTrySet:forceTrySet result:result];
   } else if ([@"selectAudioOutput" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* deviceId = argsMap[@"deviceId"];
-    [self selectAudioOutput:deviceId result:result];
+    NSString* label = argsMap[@"label"]; // optional, fallback-match for macOS
+    NSNumber* force = argsMap[@"forceTrySet"]; // optional, macOS init-time hack
+    BOOL forceTrySet = (force != nil) && [force boolValue];
+    [self selectAudioOutput:deviceId label:label forceTrySet:forceTrySet result:result];
   } else if ([@"mediaStreamGetTracks" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* streamId = argsMap[@"streamId"];
@@ -2612,10 +2626,50 @@ static FlutterWebRTCPlugin *sharedSingleton;
 #pragma mark - RTCAudioDeviceModuleDelegate methods
 
 - (void)audioDeviceModuleDidUpdateDevices:(RTCAudioDeviceModule *)audioDeviceModule {
-    NSLog(@"audioDeviceModule did update devices");
+    NSLog(@"audioDeviceModule did update devices (outputs=%lu inputs=%lu)",
+          (unsigned long)audioDeviceModule.outputDevices.count,
+          (unsigned long)audioDeviceModule.inputDevices.count);
     if (self.eventSink) {
       postEvent( self.eventSink, @{@"event" : @"onDeviceChange"});
     }
+#if TARGET_OS_OSX
+    // Применяем pending audio output / input — сюда мы попадаем когда
+    // ADM наконец-то проенумерировал устройства (либо при первом
+    // populate, либо при plug/unplug). Без этого ранние вызовы
+    // `selectAudioOutput:` срываются на пустом outputDevices.
+    if (self.pendingOutputLabel.length > 0) {
+      NSString* label = self.pendingOutputLabel;
+      for (RTCIODevice* device in audioDeviceModule.outputDevices) {
+        if ([label isEqualToString:device.name]) {
+          if (audioDeviceModule.playing) {
+            audioDeviceModule.outputDevice = device;
+            NSLog(@"[FlutterWebRTC] pending output applied (lazy, playing=1): %@", label);
+          } else {
+            BOOL ok = [audioDeviceModule trySetOutputDevice:device];
+            NSLog(@"[FlutterWebRTC] pending output applied: trySetOutputDevice=%d (label=%@)", ok, label);
+          }
+          self.pendingOutputLabel = nil;
+          break;
+        }
+      }
+    }
+    if (self.pendingInputLabel.length > 0) {
+      NSString* label = self.pendingInputLabel;
+      for (RTCIODevice* device in audioDeviceModule.inputDevices) {
+        if ([label isEqualToString:device.name]) {
+          if (audioDeviceModule.recording) {
+            audioDeviceModule.inputDevice = device;
+            NSLog(@"[FlutterWebRTC] pending input applied (lazy, recording=1): %@", label);
+          } else {
+            BOOL ok = [audioDeviceModule trySetInputDevice:device];
+            NSLog(@"[FlutterWebRTC] pending input applied: trySetInputDevice=%d (label=%@)", ok, label);
+          }
+          self.pendingInputLabel = nil;
+          break;
+        }
+      }
+    }
+#endif
 }
 
 @end

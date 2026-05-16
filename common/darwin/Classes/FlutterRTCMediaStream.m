@@ -950,16 +950,97 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 }
 
 - (void)selectAudioInput:(NSString*)deviceId result:(FlutterResult)result {
+  [self selectAudioInput:deviceId label:nil forceTrySet:NO result:result];
+}
+
+- (void)selectAudioInput:(NSString*)deviceId
+                   label:(NSString*)label
+                  result:(FlutterResult)result {
+  [self selectAudioInput:deviceId label:label forceTrySet:NO result:result];
+}
+
+- (void)selectAudioInput:(NSString*)deviceId
+                   label:(NSString*)label
+             forceTrySet:(BOOL)forceTrySet
+                  result:(FlutterResult)result {
 #if TARGET_OS_OSX
   RTCAudioDeviceModule* audioDeviceModule = [self.peerConnectionFactory audioDeviceModule];
   NSArray* inputDevices = [audioDeviceModule inputDevices];
+  NSLog(@"[FlutterWebRTC] selectAudioInput requested deviceId=%@ label=%@ available=%lu recording=%d force=%d",
+        deviceId, label, (unsigned long)inputDevices.count, audioDeviceModule.recording, forceTrySet);
+  RTCIODevice* matched = nil;
+  // Primary match: deviceId. На macOS обычно НЕ работает — Dart-side
+  // enumerate использует CoreAudio HAL UID (например "BuiltInMicrophoneDevice"),
+  // а ADM.inputDevices.deviceId — индексы (например "72"). Оставлено для
+  // совместимости с тем, кто всё-таки передаёт ADM-id напрямую.
   for (RTCIODevice* device in inputDevices) {
+    NSLog(@"[FlutterWebRTC]   in candidate id=%@ name=%@", device.deviceId, device.name);
     if ([deviceId isEqualToString:device.deviceId]) {
-      [audioDeviceModule setInputDevice:device];
-      if (result)
-        result(nil);
-      return;
+      matched = device;
+      break;
     }
+  }
+  // Fallback: точное совпадение по name == label. Этим путём идёт
+  // SCC: лейбл устройства из enumerate'а одинаково отображается и в
+  // ADM (RTCIODevice.name), и на dart-стороне (MediaDeviceInfo.label).
+  if (matched == nil && label.length > 0) {
+    for (RTCIODevice* device in inputDevices) {
+      if ([label isEqualToString:device.name]) {
+        matched = device;
+        NSLog(@"[FlutterWebRTC]   in matched by label → id=%@ name=%@", device.deviceId, device.name);
+        break;
+      }
+    }
+  }
+  if (matched != nil) {
+    // Логика симметрична `selectAudioOutput`:
+    //
+    //   * `recording=0` (ADM idle, между звонками) → `trySetInputDevice`
+    //     безопасен, обновляет inputDevice и переинициализирует capture
+    //     на следующий start.
+    //
+    //   * `recording=1 && forceTrySet=0` → lazy property set. Новый
+    //     inputDevice применится только при следующем capture init
+    //     (т.е. при следующем `getUserMedia` после `stopRecording`).
+    //     В этом режиме `getUserMedia` поверх активного capture **не
+    //     пересоздаёт** AudioCaptureClient — track связан со старым
+    //     устройством. Это и есть симптом «горячая замена работает
+    //     только со следующим звонком».
+    //
+    //   * `recording=1 && forceTrySet=1` → полный stop → set → init →
+    //     start цикл (как для output). audio_unit пересоздаётся с новым
+    //     CoreAudio device id; следующий `getUserMedia` (вызывается
+    //     из `_refreshActiveCallAudioTrack` на Dart-стороне) создаст
+    //     track из НОВОГО capture, `replaceTrack` на active sender
+    //     переключит микрофон без re-INVITE. Glitch в разговоре ~50-150 мс.
+    if (audioDeviceModule.recording && !forceTrySet) {
+      audioDeviceModule.inputDevice = matched;
+      NSLog(@"[FlutterWebRTC] setInputDevice (lazy, recording=1) → %@", matched.name);
+    } else if (audioDeviceModule.recording && forceTrySet) {
+      NSInteger stopRc = [audioDeviceModule stopRecording];
+      audioDeviceModule.inputDevice = matched;
+      NSInteger initRc = [audioDeviceModule initRecording];
+      NSInteger startRc = [audioDeviceModule startRecording];
+      NSLog(@"[FlutterWebRTC] hot-swap input (force=1, recording=1): stop=%ld → set=%@ → init=%ld → start=%ld",
+            (long)stopRc, matched.name, (long)initRc, (long)startRc);
+    } else {
+      BOOL ok = [audioDeviceModule trySetInputDevice:matched];
+      NSLog(@"[FlutterWebRTC] trySetInputDevice → %d (device=%@)", ok, matched.name);
+    }
+    self.pendingInputLabel = nil;
+    if (result)
+      result(nil);
+    return;
+  }
+  // Match не нашёлся: ADM ещё пустой (раннее apply, до peer connection)
+  // или device пропал. Сохраняем label как pending — применим в
+  // `audioDeviceModuleDidUpdateDevices:` когда ADM проенумерируется.
+  if (label.length > 0) {
+    self.pendingInputLabel = label;
+    NSLog(@"[FlutterWebRTC] selectAudioInput: stored pending label=%@", label);
+    if (result)
+      result(nil);
+    return;
   }
 #endif
 #if TARGET_OS_IPHONE
@@ -983,15 +1064,105 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 }
 
 - (void)selectAudioOutput:(NSString*)deviceId result:(FlutterResult)result {
+  [self selectAudioOutput:deviceId label:nil forceTrySet:NO result:result];
+}
+
+- (void)selectAudioOutput:(NSString*)deviceId
+                    label:(NSString*)label
+                   result:(FlutterResult)result {
+  [self selectAudioOutput:deviceId label:label forceTrySet:NO result:result];
+}
+
+- (void)selectAudioOutput:(NSString*)deviceId
+                    label:(NSString*)label
+             forceTrySet:(BOOL)forceTrySet
+                   result:(FlutterResult)result {
 #if TARGET_OS_OSX
   RTCAudioDeviceModule* audioDeviceModule = [self.peerConnectionFactory audioDeviceModule];
   NSArray* outputDevices = [audioDeviceModule outputDevices];
+  NSLog(@"[FlutterWebRTC] selectAudioOutput requested deviceId=%@ label=%@ available=%lu playing=%d force=%d",
+        deviceId, label, (unsigned long)outputDevices.count, audioDeviceModule.playing, forceTrySet);
+  RTCIODevice* matched = nil;
+  // Primary match: deviceId. На macOS обычно НЕ работает (см. коммент
+  // в selectAudioInput выше). Оставлено для совместимости.
   for (RTCIODevice* device in outputDevices) {
+    NSLog(@"[FlutterWebRTC]   out candidate id=%@ name=%@", device.deviceId, device.name);
     if ([deviceId isEqualToString:device.deviceId]) {
-      [audioDeviceModule setOutputDevice:device];
-      result(nil);
-      return;
+      matched = device;
+      break;
     }
+  }
+  // Fallback: точное совпадение по name == label.
+  if (matched == nil && label.length > 0) {
+    for (RTCIODevice* device in outputDevices) {
+      if ([label isEqualToString:device.name]) {
+        matched = device;
+        NSLog(@"[FlutterWebRTC]   out matched by label → id=%@ name=%@", device.deviceId, device.name);
+        break;
+      }
+    }
+  }
+  if (matched != nil) {
+    // Если ADM в этот момент уже проигрывает (active call) —
+    // обычно НЕЛЬЗЯ trySetOutputDevice: он делает stop→set→start
+    // audio_unit'а, и во время этого окна (~secs) sip_ua keepalive
+    // OPTIONS не получают ответа, WS падает, разговор обрывается.
+    // Использовать lazy property setter — применится к следующему init
+    // audio_unit (= к следующему звонку).
+    //
+    // Исключение: `forceTrySet=YES` приходит из Dart-retry'я СРАЗУ после
+    // getUserMedia на самом первом звонке. ADM только-только запустил
+    // playout на дефолтном устройстве (наш pending ждал, чтобы ADM
+    // populate'ился), разговор ещё толком не начался — короткое окно
+    // tear-down безопасно, связь успеет восстановиться. И только так
+    // мы реально переключим audio_unit с дефолта на выбранное устройство
+    // на первом звонке.
+    //
+    // Если ADM idle (`playing=0`, между звонками) — trySet безопасен
+    // всегда.
+    if (audioDeviceModule.playing && !forceTrySet) {
+      audioDeviceModule.outputDevice = matched;
+      NSLog(@"[FlutterWebRTC] setOutputDevice (lazy, playing=1) → %@", matched.name);
+    } else if (audioDeviceModule.playing && forceTrySet) {
+      // Hot-swap во время активного звонка / loopback warm-up.
+      //
+      // ВАЖНО: в LiveKit-форке WebRTC-SDK (audioDeviceModuleType:0,
+      // CoreAudio ADM) `trySetOutputDevice` возвращает YES, но НЕ
+      // перезапускает audio_unit когда ADM уже `playing=1` — он только
+      // меняет property, и физический playout продолжается через старое
+      // устройство. Поэтому явно крутим цикл stop → set → init → start:
+      // audio_unit пересоздаётся с новым CoreAudio device id.
+      //
+      // ВАЖНО: между stopPlayout и startPlayout НУЖЕН initPlayout, иначе
+      // start возвращает -1 (playout не запускается) — libwebrtc требует
+      // init после stop для повторной инициализации audio_unit. Без этого
+      // юзер теряет голос И микрофон после переключения устройства.
+      //
+      // Стоит ~50–150 мс глитча в разговоре, но это единственный
+      // способ переключить устройство во время звонка с CoreAudio ADM.
+      NSInteger stopRc = [audioDeviceModule stopPlayout];
+      audioDeviceModule.outputDevice = matched;
+      NSInteger initRc = [audioDeviceModule initPlayout];
+      NSInteger startRc = [audioDeviceModule startPlayout];
+      NSLog(@"[FlutterWebRTC] hot-swap output (force=1, playing=1): stop=%ld → set=%@ → init=%ld → start=%ld",
+            (long)stopRc, matched.name, (long)initRc, (long)startRc);
+    } else {
+      BOOL ok = [audioDeviceModule trySetOutputDevice:matched];
+      NSLog(@"[FlutterWebRTC] trySetOutputDevice → %d (device=%@, playing=%d, force=%d)",
+            ok, matched.name, audioDeviceModule.playing, forceTrySet);
+    }
+    self.pendingOutputLabel = nil;
+    result(nil);
+    return;
+  }
+  // Match не нашёлся: ADM ещё пустой (раннее apply на старте, до
+  // первого peer connection) или device пропал. Сохраняем label как
+  // pending — применим в `audioDeviceModuleDidUpdateDevices:`.
+  if (label.length > 0) {
+    self.pendingOutputLabel = label;
+    NSLog(@"[FlutterWebRTC] selectAudioOutput: stored pending label=%@", label);
+    result(nil);
+    return;
   }
 #endif
 #if TARGET_OS_IPHONE
