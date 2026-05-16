@@ -31,6 +31,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc_base.cc"
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
+  "audio_session_naming.cc"
 )
 
 include_directories(
