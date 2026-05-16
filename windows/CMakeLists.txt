@@ -56,8 +56,26 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll.lib"
 )
 
-# List of absolute paths to libraries that should be bundled with the plugin
-set(flutter_webrtc_bundled_libraries
+# List of absolute paths to libraries that should be bundled with the plugin.
+#
+# ВАЖНО: резолвим путь через `get_filename_component(... ABSOLUTE)`,
+# чтобы получить нормализованный canonical путь напрямую в pub-cache
+# (без `..` через symlink). Дефолтный шаблон писал
+# `${CMAKE_CURRENT_SOURCE_DIR}/../third_party/...`, и при подмешивании
+# в `PLUGIN_BUNDLED_LIBRARIES` основного проекта это разворачивается в
+# `.../plugin_symlinks/flutter_webrtc/windows/../third_party/.../
+# libwebrtc.dll`. CMake `file(INSTALL FILES ...)` пытается резолвить
+# `..` через symlink — на Windows это даёт false-negative и install
+# падает с «file INSTALL cannot find ...libwebrtc.dll».
+#
+# Через `ABSOLUTE` получаем настоящий путь в pub-cache (например
+# `C:/Users/<user>/AppData/Local/Pub/Cache/git/flutter-webrtc-<hash>/
+# third_party/libwebrtc/lib/win64/libwebrtc.dll`), `..` и symlink
+# из install destination'а исчезают, копирование работает.
+get_filename_component(_libwebrtc_dll_abs
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll"
+  ABSOLUTE)
+set(flutter_webrtc_bundled_libraries
+  "${_libwebrtc_dll_abs}"
   PARENT_SCOPE
 )
