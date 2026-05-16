@@ -18,6 +18,20 @@
                               result:(nonnull FlutterResult)result;
 
 - (void)selectAudioInput:(nonnull NSString*)deviceId result:(nullable FlutterResult)result;
+- (void)selectAudioInput:(nonnull NSString*)deviceId
+                   label:(nullable NSString*)label
+                  result:(nullable FlutterResult)result;
+- (void)selectAudioInput:(nonnull NSString*)deviceId
+                   label:(nullable NSString*)label
+             forceTrySet:(BOOL)forceTrySet
+                  result:(nullable FlutterResult)result;
 
 - (void)selectAudioOutput:(nonnull NSString*)deviceId result:(nullable FlutterResult)result;
+- (void)selectAudioOutput:(nonnull NSString*)deviceId
+                    label:(nullable NSString*)label
+                   result:(nullable FlutterResult)result;
+- (void)selectAudioOutput:(nonnull NSString*)deviceId
+                    label:(nullable NSString*)label
+             forceTrySet:(BOOL)forceTrySet
+                   result:(nullable FlutterResult)result;
 @end

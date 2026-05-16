@@ -70,6 +70,15 @@ typedef void (^CapturerStopHandler)(CompletionHandler _Nonnull handler);
 
 @property(nonatomic, strong) AudioManager* _Nullable audioManager;
 
+#if TARGET_OS_OSX
+// Pending audio device selection. Хранится здесь когда `selectAudioOutput:`
+// / `selectAudioInput:` приходят раньше, чем ADM проенумерировал устройства
+// (`outputDevices=[]` / `inputDevices=[]`). После того как ADM пришлёт
+// `audioDeviceModuleDidUpdateDevices:`, мы применяем pending'и.
+@property(nonatomic, strong) NSString* _Nullable pendingOutputLabel;
+@property(nonatomic, strong) NSString* _Nullable pendingInputLabel;
+#endif
+
 - (RTCMediaStream* _Nullable)streamForId:(NSString* _Nonnull)streamId
                         peerConnectionId:(NSString* _Nullable)peerConnectionId;
 - (RTCMediaStreamTrack* _Nullable)trackForId:(NSString* _Nonnull)trackId
