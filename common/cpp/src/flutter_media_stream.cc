@@ -131,7 +131,19 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
   if (FAILED(hr) || !pEnumerator) return 0;
 
   IMMDeviceCollection* pCollection = nullptr;
-  hr = pEnumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &pCollection);
+  // ACTIVE | UNPLUGGED — нужно для BT-наушников. Bluetooth-устройство
+  // имеет два endpoint'а (A2DP «Наушники» и HFP «Головной телефон»).
+  // Когда BT-стек в A2DP-режиме (стерео-музыка), HFP-endpoint
+  // переходит в `DEVICE_STATE_UNPLUGGED` (как jack без кабеля).
+  // Windows Volume Mixer всё равно показывает его в списке — он
+  // транспарентно перейдёт в ACTIVE как только приложение откроет
+  // capture (BT-stack switch'нёт профиль). Если фильтровать только
+  // ACTIVE — оператор видит «исчезнувший» AirPods Pro микрофон в
+  // нашем dropdown'е после первого звонка/idle (HFP отвалился, A2DP
+  // активен). DISABLED (user отключил) и NOTPRESENT (железо
+  // отсутствует) НЕ включаем — это реальная недоступность.
+  hr = pEnumerator->EnumAudioEndpoints(
+      flow, DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED, &pCollection);
   if (FAILED(hr) || !pCollection) {
     pEnumerator->Release();
     return 0;
