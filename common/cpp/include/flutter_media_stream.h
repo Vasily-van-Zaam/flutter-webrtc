@@ -26,7 +26,20 @@ class FlutterMediaStream {
   void SelectAudioOutput(const std::string& device_id,
                          std::unique_ptr<MethodResultProxy> result);
 
+  // 3-арг форма: label-fallback match + forceTrySet флаг (для будущего
+  // hot-swap во время playout/recording). Совместима с 1-арг —
+  // диспатчер вызывает её с label="", force_try_set=false.
+  void SelectAudioOutput(const std::string& device_id,
+                         const std::string& label,
+                         bool force_try_set,
+                         std::unique_ptr<MethodResultProxy> result);
+
   void SelectAudioInput(const std::string& device_id,
+                        std::unique_ptr<MethodResultProxy> result);
+
+  void SelectAudioInput(const std::string& device_id,
+                        const std::string& label,
+                        bool force_try_set,
                         std::unique_ptr<MethodResultProxy> result);
 
   void MediaStreamGetTracks(const std::string& stream_id,
