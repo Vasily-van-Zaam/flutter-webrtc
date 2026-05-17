@@ -121,12 +121,20 @@ void FlutterWebRTC::HandleMethodCall(
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string deviceId = findString(params, "deviceId");
-    SelectAudioInput(deviceId, std::move(result));
+    // Optional: label (fallback match если deviceId не нашёлся в ADM)
+    // и forceTrySet (для будущего hot-swap during recording=1).
+    // Отсутствие = "" / false, поведение совпадает со старым 1-арг
+    // путём — backward-compatible.
+    const std::string label = findString(params, "label");
+    const bool forceTrySet = findBoolean(params, "forceTrySet");
+    SelectAudioInput(deviceId, label, forceTrySet, std::move(result));
   } else if (method_call.method_name().compare("selectAudioOutput") == 0) {
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string deviceId = findString(params, "deviceId");
-    SelectAudioOutput(deviceId, std::move(result));
+    const std::string label = findString(params, "label");
+    const bool forceTrySet = findBoolean(params, "forceTrySet");
+    SelectAudioOutput(deviceId, label, forceTrySet, std::move(result));
   } else if (method_call.method_name().compare("mediaStreamGetTracks") == 0) {
     if (!method_call.arguments()) {
       result->Error("Bad Arguments", "Null constraints arguments received");

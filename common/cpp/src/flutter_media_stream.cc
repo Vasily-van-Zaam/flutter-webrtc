@@ -1,5 +1,7 @@
 #include "flutter_media_stream.h"
 
+#include <iostream>
+
 #include "flutter_utf8_sanitize.h"
 
 #ifdef _WIN32
@@ -550,68 +552,170 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   result->Success(EncodableValue(params));
 }
 
+// 1-арг форма — обратная совместимость для legacy callers.
+// Forwards в 3-арг с пустым label и force_try_set=false.
 void FlutterMediaStream::SelectAudioOutput(
     const std::string& device_id,
+    std::unique_ptr<MethodResultProxy> result) {
+  SelectAudioOutput(device_id, "", false, std::move(result));
+}
+
+void FlutterMediaStream::SelectAudioOutput(
+    const std::string& device_id,
+    const std::string& label,
+    bool force_try_set,
     std::unique_ptr<MethodResultProxy> result) {
   // Пустой / "default" deviceId — не пинимся к конкретному устройству,
   // оставляем ADM на системном default'е. Это критично для Windows:
   // selectAudioOutput("default") должен возвращать success, не error,
   // чтобы Dart-слой мог явно сказать «следуй за системой».
   if (device_id == "" || device_id == "default") {
+    std::cout << "[FlutterWebRTC] selectAudioOutput: default/empty deviceId"
+              << " — skipping (label=\"" << label
+              << "\" force=" << force_try_set << ")" << std::endl;
     result->Success();
     return;
   }
+  const int playout_devices = base_->audio_device_->PlayoutDevices();
+  std::cout << "[FlutterWebRTC] selectAudioOutput requested deviceId="
+            << device_id << " label=\"" << label
+            << "\" force=" << force_try_set
+            << " admDevices=" << playout_devices << std::endl;
+
   char deviceName[256];
   char deviceGuid[256];
-  int playout_devices = base_->audio_device_->PlayoutDevices();
+  uint16_t matched_index = 0;
   bool found = false;
+  // Primary match — по device_id (sanitized name+guid). На Win совпадает
+  // с тем что Dart-side получает через `enumerateDevices`, должен
+  // работать out-of-the-box.
   for (uint16_t i = 0; i < playout_devices; i++) {
     base_->audio_device_->PlayoutDeviceName(i, deviceName, deviceGuid);
     std::string cur_device_id =
         SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
+    std::cout << "[FlutterWebRTC]   out candidate i=" << i
+              << " id=" << cur_device_id << " name=\"" << deviceName << "\""
+              << std::endl;
     if (device_id == cur_device_id) {
-      base_->audio_device_->SetPlayoutDevice(i);
+      matched_index = i;
       found = true;
+      std::cout << "[FlutterWebRTC]   out matched by deviceId → i=" << i
+                << std::endl;
       break;
+    }
+  }
+  // Fallback match — по label == ADM-device-name. Полезно если Dart
+  // прислал deviceId в формате который Win ADM не использует.
+  if (!found && !label.empty()) {
+    for (uint16_t i = 0; i < playout_devices; i++) {
+      base_->audio_device_->PlayoutDeviceName(i, deviceName, deviceGuid);
+      if (label == std::string(deviceName)) {
+        matched_index = i;
+        found = true;
+        std::cout << "[FlutterWebRTC]   out matched by label → i=" << i
+                  << " name=\"" << deviceName << "\"" << std::endl;
+        break;
+      }
     }
   }
   if (!found) {
     // Не нашли в ADM-перечислении — возможно устройство в IMM-списке
     // (Windows Core Audio) но не зарегистрировано в ADM. Тогда
     // success без явной смены — libwebrtc возьмёт системный default.
+    std::cout << "[FlutterWebRTC]   out NOT matched, falling back to "
+                 "system default"
+              << std::endl;
     result->Success();
     return;
   }
+  // force_try_set пока не имеет специального обработчика на Win —
+  // публичный `RTCAudioDevice` C++ API (libwebrtc v1.4.0) НЕ
+  // экспортирует `StopPlayout/InitPlayout/StartPlayout`, поэтому
+  // явный hot-swap-цикл во время playout=1 невозможен через текущий
+  // API. SetPlayoutDevice применяется немедленно если ADM idle, или
+  // lazy на следующий InitPlayout если уже работает. См.
+  // `todo_2026_05_17_windows_audio_hot_swap.md` для плана.
+  const int32_t rc = base_->audio_device_->SetPlayoutDevice(matched_index);
+  std::cout << "[FlutterWebRTC] SetPlayoutDevice(" << matched_index
+            << ") rc=" << rc << " (force=" << force_try_set << ")"
+            << std::endl;
   result->Success();
 }
 
 void FlutterMediaStream::SelectAudioInput(
     const std::string& device_id,
     std::unique_ptr<MethodResultProxy> result) {
+  SelectAudioInput(device_id, "", false, std::move(result));
+}
+
+void FlutterMediaStream::SelectAudioInput(
+    const std::string& device_id,
+    const std::string& label,
+    bool force_try_set,
+    std::unique_ptr<MethodResultProxy> result) {
   if (device_id == "" || device_id == "default") {
+    std::cout << "[FlutterWebRTC] selectAudioInput: default/empty deviceId"
+              << " — skipping (label=\"" << label
+              << "\" force=" << force_try_set << ")" << std::endl;
     result->Success();
     return;
   }
+  const int recording_devices = base_->audio_device_->RecordingDevices();
+  std::cout << "[FlutterWebRTC] selectAudioInput requested deviceId="
+            << device_id << " label=\"" << label
+            << "\" force=" << force_try_set
+            << " admDevices=" << recording_devices << std::endl;
+
   char deviceName[256];
   char deviceGuid[256];
-  int recording_devices = base_->audio_device_->RecordingDevices();
+  uint16_t matched_index = 0;
   bool found = false;
   for (uint16_t i = 0; i < recording_devices; i++) {
     base_->audio_device_->RecordingDeviceName(i, deviceName, deviceGuid);
     std::string cur_device_id =
         SanitizeDeviceIdFromAudioBuffers(deviceName, deviceGuid);
+    std::cout << "[FlutterWebRTC]   in candidate i=" << i
+              << " id=" << cur_device_id << " name=\"" << deviceName << "\""
+              << std::endl;
     if (device_id == cur_device_id) {
-      base_->audio_device_->SetRecordingDevice(i);
+      matched_index = i;
       found = true;
+      std::cout << "[FlutterWebRTC]   in matched by deviceId → i=" << i
+                << std::endl;
       break;
     }
   }
+  if (!found && !label.empty()) {
+    for (uint16_t i = 0; i < recording_devices; i++) {
+      base_->audio_device_->RecordingDeviceName(i, deviceName, deviceGuid);
+      if (label == std::string(deviceName)) {
+        matched_index = i;
+        found = true;
+        std::cout << "[FlutterWebRTC]   in matched by label → i=" << i
+                  << " name=\"" << deviceName << "\"" << std::endl;
+        break;
+      }
+    }
+  }
   if (!found) {
-    // Аналогично output: устройство есть в IMM-списке, но не в ADM —
-    // не считаем это ошибкой, libwebrtc возьмёт системный default.
+    std::cout << "[FlutterWebRTC]   in NOT matched, falling back to "
+                 "system default"
+              << std::endl;
     result->Success();
     return;
   }
+  // force_try_set пока no-op — нет публичного API для restart capture
+  // (см. SelectAudioOutput выше). SetRecordingDevice применяется
+  // немедленно при recording=0, или lazy при recording=1.
+  // Если SetRecordingDevice-while-recording окажется идемпотентным с
+  // auto-restart внутри WASAPI ADM — hot-swap «бесплатный». Если нет
+  // — нужен Step 2/3 из `todo_2026_05_17_windows_audio_hot_swap.md`
+  // (force-restart через replaceTrack или OnDeviceChange callback).
+  const int32_t rc =
+      base_->audio_device_->SetRecordingDevice(matched_index);
+  std::cout << "[FlutterWebRTC] SetRecordingDevice(" << matched_index
+            << ") rc=" << rc << " (force=" << force_try_set << ")"
+            << std::endl;
   result->Success();
 }
 
