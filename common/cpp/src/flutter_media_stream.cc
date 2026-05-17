@@ -16,7 +16,9 @@
 #include <propsys.h>
 #include <propvarutil.h>
 #include <combaseapi.h>
+#include <algorithm>
 #include <set>
+#include <vector>
 #pragma comment(lib, "mmdevapi.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "propsys.lib")
@@ -72,10 +74,50 @@ void EnsureComInitialized() {
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 }
 
+// Получить deviceId Windows-default endpoint'а для указанной flow+role.
+// `eMultimedia` для рендера = то что показано в Sound Mixer'е как
+// активное выходное устройство. `eCommunications` для capture = то
+// что Mixer показывает как input default (для BT-наушников это HFP-
+// эндпойнт «Головной телефон (BT)» с микрофоном; eMultimedia для
+// capture часто тот же самый, но не всегда). Пустая строка если default
+// не задан или COM-вызов не удался.
+std::string GetWindowsDefaultEndpointId(EDataFlow flow, ERole role) {
+  EnsureComInitialized();
+  IMMDeviceEnumerator* pEnumerator = nullptr;
+  HRESULT hr =
+      CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                       __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
+  if (FAILED(hr) || !pEnumerator) return "";
+
+  IMMDevice* pDefault = nullptr;
+  hr = pEnumerator->GetDefaultAudioEndpoint(flow, role, &pDefault);
+  pEnumerator->Release();
+  if (FAILED(hr) || !pDefault) return "";
+
+  LPWSTR idW = nullptr;
+  std::string result;
+  if (SUCCEEDED(pDefault->GetId(&idW)) && idW) {
+    result = WideToUtf8(idW);
+    CoTaskMemFree(idW);
+  }
+  pDefault->Release();
+  return result;
+}
+
 // Перечислить Windows audio endpoints (microphones или speakers) через
 // IMMDeviceEnumerator и добавить в `sources`. Все добавленные deviceId
 // также сохраняем в `seen_ids` для последующего дедупа с ADM-based
 // перечислением. Возвращает количество добавленных устройств.
+//
+// **Default-endpoint ставится первым в списке** (если найден среди
+// active-devices). Это нужно чтобы Dart-side `_enumerateDevicesByKind`
+// логика «первое устройство = default» совпадала с тем что показывает
+// Windows Volume Mixer / Sound settings.
+//   * Для render (output) используется `eMultimedia` — что показано в
+//     Mixer как «Устройство вывода».
+//   * Для capture (input) используется `eCommunications` — что показано
+//     в Mixer как «Устройство ввода» для voice-режима (для BT — HFP с
+//     микрофоном, а не A2DP «Наушники» без mic'а).
 int EnumerateWindowsAudioEndpoints(EncodableList& sources,
                                     std::set<std::string>& seen_ids,
                                     EDataFlow flow,
@@ -95,9 +137,26 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
     return 0;
   }
 
+  // Получаем Windows-default endpoint ДО enumerate чтобы знать какой
+  // device поставить первым.
+  const ERole defaultRole = (flow == eRender) ? eMultimedia : eCommunications;
+  const std::string defaultId = GetWindowsDefaultEndpointId(flow, defaultRole);
+  const std::string sanitizedDefaultId =
+      defaultId.empty() ? "" : SanitizeUtf8ForFlutter(defaultId);
+
   UINT count = 0;
   pCollection->GetCount(&count);
-  int added = 0;
+
+  // Сначала собираем все устройства в локальный вектор, потом
+  // переупорядочиваем (default → первым). Это позволяет emit'ить
+  // в `sources` уже в корректном порядке без вставок в середину.
+  struct Endpoint {
+    std::string sanitizedId;
+    std::string label;
+  };
+  std::vector<Endpoint> endpoints;
+  endpoints.reserve(count);
+
   for (UINT i = 0; i < count; i++) {
     IMMDevice* pDevice = nullptr;
     if (FAILED(pCollection->Item(i, &pDevice)) || !pDevice) continue;
@@ -128,18 +187,39 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
 
     if (deviceId.empty()) continue;
 
-    std::string sanitizedId = SanitizeUtf8ForFlutter(deviceId);
-    EncodableMap audio;
-    audio[EncodableValue("label")] = EncodableValue(SanitizeUtf8ForFlutter(label));
-    audio[EncodableValue("deviceId")] = EncodableValue(sanitizedId);
-    audio[EncodableValue("facing")] = "";
-    audio[EncodableValue("kind")] = kind;
-    sources.push_back(EncodableValue(audio));
-    seen_ids.insert(sanitizedId);
-    added++;
+    endpoints.push_back({
+        SanitizeUtf8ForFlutter(deviceId),
+        SanitizeUtf8ForFlutter(label),
+    });
   }
   pCollection->Release();
   pEnumerator->Release();
+
+  // Stable-partition: если default найден среди endpoints — перенести
+  // его в начало (порядок остальных сохраняется).
+  if (!sanitizedDefaultId.empty()) {
+    auto it = std::find_if(endpoints.begin(), endpoints.end(),
+                            [&](const Endpoint& e) {
+                              return e.sanitizedId == sanitizedDefaultId;
+                            });
+    if (it != endpoints.end() && it != endpoints.begin()) {
+      Endpoint def = std::move(*it);
+      endpoints.erase(it);
+      endpoints.insert(endpoints.begin(), std::move(def));
+    }
+  }
+
+  int added = 0;
+  for (const auto& e : endpoints) {
+    EncodableMap audio;
+    audio[EncodableValue("label")] = EncodableValue(e.label);
+    audio[EncodableValue("deviceId")] = EncodableValue(e.sanitizedId);
+    audio[EncodableValue("facing")] = "";
+    audio[EncodableValue("kind")] = kind;
+    sources.push_back(EncodableValue(audio));
+    seen_ids.insert(e.sanitizedId);
+    added++;
+  }
   return added;
 }
 
