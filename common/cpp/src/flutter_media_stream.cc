@@ -13,13 +13,11 @@
 // проблемы с инициализацией ADM до первого peer connection).
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
-#include <propkey.h>          // PKEY_Device_EnumeratorName
 #include <propsys.h>
 #include <propvarutil.h>
 #include <combaseapi.h>
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <memory>
 #include <set>
 #include <vector>
@@ -135,19 +133,16 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
   if (FAILED(hr) || !pEnumerator) return 0;
 
   IMMDeviceCollection* pCollection = nullptr;
-  // ACTIVE | UNPLUGGED. Зачем UNPLUGGED — нужно для BT-наушников:
-  // Bluetooth-устройство имеет два endpoint'а (A2DP «Наушники» и HFP
-  // «Головной телефон»). Когда BT-стек в A2DP-режиме, HFP-endpoint
-  // переходит в `DEVICE_STATE_UNPLUGGED` (как jack без кабеля). Если
-  // фильтровать только ACTIVE — оператор видит «исчезнувший» AirPods
-  // Pro микрофон в dropdown'е после первого idle (HFP отвалился, A2DP
-  // активен). Поэтому UNPLUGGED оставляем — но ниже в цикле для каждого
-  // UNPLUGGED endpoint'а проверяем bus enumerator: если это НЕ BT
-  // (например wired HDAUDIO jack с пустым гнездом или USB-Audio,
-  // которое отстранено физически), — скипаем. DISABLED / NOTPRESENT
-  // не включаем — реальная недоступность.
-  hr = pEnumerator->EnumAudioEndpoints(
-      flow, DEVICE_STATE_ACTIVE | DEVICE_STATE_UNPLUGGED, &pCollection);
+  // ТОЛЬКО `DEVICE_STATE_ACTIVE` — dropdown показывает только реально
+  // доступные сейчас устройства. Trade-off: при HFP↔A2DP profile-swap у
+  // BT-гарнитуры (например AirPods Pro в начале звонка) HFP-endpoint
+  // может ~мс быть в `DEVICE_STATE_UNPLUGGED` — в эту секунду он
+  // пропадёт из dropdown'а и вернётся когда BT-стек завершит switch.
+  // Пользователь явно выбрал «честный dropdown» (2026-05-19) — лучше
+  // мс-окно «пропал-вернулся», чем «фантомы» отсоединённых наушников.
+  // DISABLED / NOTPRESENT тоже не включаем — реальная недоступность.
+  hr = pEnumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE,
+                                        &pCollection);
   if (FAILED(hr) || !pCollection) {
     pEnumerator->Release();
     return 0;
@@ -177,16 +172,6 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
     IMMDevice* pDevice = nullptr;
     if (FAILED(pCollection->Item(i, &pDevice)) || !pDevice) continue;
 
-    // Узнаём state — нужно чтобы понять, надо ли применять BT-only
-    // фильтр UNPLUGGED. ACTIVE добавляем всегда. Если что-то ещё —
-    // скипаем (DISABLED / NOTPRESENT нам сюда уже не приходят из-за
-    // фильтра выше, но GetState может вернуть и другое).
-    DWORD state = 0;
-    if (FAILED(pDevice->GetState(&state))) {
-      pDevice->Release();
-      continue;
-    }
-
     LPWSTR deviceIdW = nullptr;
     std::string deviceId;
     if (SUCCEEDED(pDevice->GetId(&deviceIdW)) && deviceIdW) {
@@ -194,14 +179,9 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
       CoTaskMemFree(deviceIdW);
     }
 
-    // FriendlyName + EnumeratorName из одного OpenPropertyStore.
-    // EnumeratorName: "BTHENUM"/"BTHHFENUM" — BT, "HDAUDIO" — onboard
-    // jack, "USB" — USB-Audio, "MMDEVAPI" / "SWD" — virtual. Для
-    // UNPLUGGED нам важен только BT-prefix: wired UNPLUGGED означает
-    // реально пустой jack или отсоединённый USB — оператору такое
-    // устройство не нужно выбирать.
+    // FriendlyName — то что показывается в Sound панели и Volume Mixer
+    // (например «Микрофон (Realtek High Definition Audio)»).
     std::string label;
-    std::string enumerator;
     IPropertyStore* pProps = nullptr;
     if (SUCCEEDED(pDevice->OpenPropertyStore(STGM_READ, &pProps)) && pProps) {
       PROPVARIANT varName;
@@ -211,38 +191,12 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
         label = WideToUtf8(varName.pwszVal);
       }
       PropVariantClear(&varName);
-
-      PROPVARIANT varEnum;
-      PropVariantInit(&varEnum);
-      if (SUCCEEDED(pProps->GetValue(PKEY_Device_EnumeratorName, &varEnum)) &&
-          varEnum.vt == VT_LPWSTR && varEnum.pwszVal) {
-        enumerator = WideToUtf8(varEnum.pwszVal);
-      }
-      PropVariantClear(&varEnum);
       pProps->Release();
     }
 
     pDevice->Release();
 
     if (deviceId.empty()) continue;
-
-    if (state == DEVICE_STATE_UNPLUGGED) {
-      // Сравниваем case-insensitive prefix: enumerator на разных
-      // Win-конфигах бывает "BTHENUM" / "BTHHFENUM" / "Bluetooth".
-      auto starts_with_bt = [&]() {
-        if (enumerator.size() < 2) return false;
-        char c0 = static_cast<char>(std::toupper(
-            static_cast<unsigned char>(enumerator[0])));
-        char c1 = static_cast<char>(std::toupper(
-            static_cast<unsigned char>(enumerator[1])));
-        return c0 == 'B' && c1 == 'T';
-      };
-      if (!starts_with_bt()) {
-        // Wired jack без плага / USB-Audio без устройства — пропускаем,
-        // оператор не должен видеть несуществующее устройство в выборе.
-        continue;
-      }
-    }
 
     endpoints.push_back({
         SanitizeUtf8ForFlutter(deviceId),
