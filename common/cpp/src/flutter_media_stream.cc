@@ -150,7 +150,23 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
 
   // Получаем Windows-default endpoint ДО enumerate чтобы знать какой
   // device поставить первым.
-  const ERole defaultRole = (flow == eRender) ? eMultimedia : eCommunications;
+  //
+  // Для call-center приложения используем `eCommunications` для ОБЕИХ
+  // flow (render + capture). Это «устройство для звонков» в Windows
+  // (Sound settings → правый клик → Default Communication Device).
+  // Раньше для render бралось `eMultimedia` (default для музыки) —
+  // это давало split: output = A2DP-BT, input = HFP-2-BT (потому что
+  // eMultimedia для render и eCommunications для capture могут указывать
+  // на разные физические гарнитуры). Когда app открывал HFP capture на
+  // 2-BT, Win BT-stack acquire HFP на 2-BT, освобождал HFP с BT, и
+  // Multimedia default перепрыгивал тоже на 2-BT → весь user-experience
+  // ломался.
+  //
+  // С eCommunications для обоих flow output и input согласованны и
+  // следуют тому что юзер назначил как «устройство для звонков» в Win
+  // Sound settings. Если он не задал явно — Win всё равно возвращает
+  // что-то осмысленное (обычно совпадает с Multimedia).
+  const ERole defaultRole = eCommunications;
   const std::string defaultId = GetWindowsDefaultEndpointId(flow, defaultRole);
   const std::string sanitizedDefaultId =
       defaultId.empty() ? "" : SanitizeUtf8ForFlutter(defaultId);
