@@ -17,6 +17,8 @@
 #include <propvarutil.h>
 #include <combaseapi.h>
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <set>
 #include <vector>
 #pragma comment(lib, "mmdevapi.lib")
@@ -239,6 +241,107 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
 
 }  // namespace
 
+#ifdef _WIN32
+// Собственный IMMNotificationClient — нужен потому что libwebrtc'шный
+// `audio_device_->OnDeviceChange` на Win НЕ срабатывает на physical unplug
+// (USB/BT). Подтверждено логом 2026-05-18: ни одного `[Audio] ondevicechange`
+// после отсоединения наушников. Это лечится не в libwebrtc.dll (который
+// пересобирать долго и больно), а на нашем уровне — `IMMNotificationClient`
+// это чисто COM-интерфейс системы, регистрируется через
+// `IMMDeviceEnumerator::RegisterEndpointNotificationCallback`. Плагину
+// достаточно реализовать его и эмитить в event_channel один и тот же payload
+// `{"event":"onDeviceChange"}` — Dart-сторона уже всё умеет обрабатывать
+// через `navigator.mediaDevices.ondevicechange` (см. SipService).
+//
+// Thread-safety: коллбэки IMMNotificationClient приходят на random COM
+// worker thread. Звать `EventChannelProxy::Success` отсюда безопасно —
+// внутри него уже `task_runner_->EnqueueTask(...)` маршалит доставку
+// sink->Success на Flutter UI thread (см. flutter_common.cc:136-148).
+class MMDeviceNotificationClient : public IMMNotificationClient {
+ public:
+  explicit MMDeviceNotificationClient(FlutterWebRTCBase* base)
+      : base_(base),
+        ref_(1),
+        alive_(std::make_shared<std::atomic<bool>>(true)) {}
+
+  // Внешний accessor для FlutterMediaStream::dtor — снимаем флаг ДО
+  // UnregisterEndpointNotificationCallback. Если коллбэк уже летит в COM
+  // worker thread'е, он увидит alive=false и пропустит обращение к base_.
+  std::shared_ptr<std::atomic<bool>> alive_handle() const { return alive_; }
+
+  // IUnknown
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return InterlockedIncrement(&ref_);
+  }
+  ULONG STDMETHODCALLTYPE Release() override {
+    ULONG r = InterlockedDecrement(&ref_);
+    if (r == 0) {
+      delete this;
+    }
+    return r;
+  }
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+    if (!ppv) return E_POINTER;
+    if (riid == __uuidof(IUnknown) ||
+        riid == __uuidof(IMMNotificationClient)) {
+      *ppv = static_cast<IMMNotificationClient*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  // IMMNotificationClient — все четыре релевантных коллбэка эмитят один и
+  // тот же event. Dart дебаунсит серию (500ms) и делает один refresh.
+  HRESULT STDMETHODCALLTYPE
+  OnDeviceStateChanged(LPCWSTR /*deviceId*/, DWORD newState) override {
+    std::cout << "[FlutterWebRTC] MMNotification: DeviceStateChanged state=0x"
+              << std::hex << newState << std::dec << std::endl;
+    Emit();
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR /*deviceId*/) override {
+    std::cout << "[FlutterWebRTC] MMNotification: DeviceAdded" << std::endl;
+    Emit();
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR /*deviceId*/) override {
+    std::cout << "[FlutterWebRTC] MMNotification: DeviceRemoved" << std::endl;
+    Emit();
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow,
+                                                   ERole role,
+                                                   LPCWSTR /*deviceId*/) override {
+    std::cout << "[FlutterWebRTC] MMNotification: DefaultDeviceChanged flow="
+              << flow << " role=" << role << std::endl;
+    Emit();
+    return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE
+  OnPropertyValueChanged(LPCWSTR /*deviceId*/, const PROPERTYKEY /*key*/) override {
+    // Спамит на каждый property update (volume, format change, etc) — нам
+    // это не нужно, audio-device-state мы получаем через State/Added/Removed.
+    return S_OK;
+  }
+
+ private:
+  void Emit() {
+    // Guard для случая, когда FlutterMediaStream::~ уже отметил нас как
+    // мёртвых, но Windows core audio thread всё ещё в полёте с callback'ом.
+    if (!alive_->load()) return;
+    EncodableMap info;
+    info[EncodableValue("event")] = "onDeviceChange";
+    base_->event_channel()->Success(EncodableValue(info), false);
+  }
+
+  FlutterWebRTCBase* base_;
+  LONG ref_;
+  std::shared_ptr<std::atomic<bool>> alive_;
+};
+#endif  // _WIN32
+
 FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
   // Capture `base` by value (pointer copy) instead of `[&]` (raw `this`).
   // The original `[&]` capture causes use-after-free on Windows when
@@ -250,6 +353,68 @@ FlutterMediaStream::FlutterMediaStream(FlutterWebRTCBase* base) : base_(base) {
     info[EncodableValue("event")] = "onDeviceChange";
     base->event_channel()->Success(EncodableValue(info), false);
   });
+
+#ifdef _WIN32
+  // Регистрируем свой IMMNotificationClient. См. комментарий над классом
+  // MMDeviceNotificationClient — это покрывает гэп с libwebrtc, который
+  // на физический unplug на Win не реагирует.
+  EnsureComInitialized();
+  HRESULT hr = CoCreateInstance(
+      __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+      __uuidof(IMMDeviceEnumerator),
+      reinterpret_cast<void**>(&mm_enumerator_));
+  if (SUCCEEDED(hr) && mm_enumerator_) {
+    mm_notification_client_ = new MMDeviceNotificationClient(base_);
+    hr = mm_enumerator_->RegisterEndpointNotificationCallback(
+        mm_notification_client_);
+    if (FAILED(hr)) {
+      std::cout << "[FlutterWebRTC] RegisterEndpointNotificationCallback "
+                   "failed hr=0x"
+                << std::hex << hr << std::dec << std::endl;
+      mm_notification_client_->Release();
+      mm_notification_client_ = nullptr;
+      mm_enumerator_->Release();
+      mm_enumerator_ = nullptr;
+    } else {
+      std::cout << "[FlutterWebRTC] MMNotificationClient registered"
+                << std::endl;
+    }
+  } else {
+    std::cout << "[FlutterWebRTC] CoCreateInstance(MMDeviceEnumerator) "
+                 "failed hr=0x"
+              << std::hex << hr << std::dec << std::endl;
+  }
+#endif
+}
+
+FlutterMediaStream::~FlutterMediaStream() {
+#ifdef _WIN32
+  // 1. Помечаем notification client мёртвым ДО Unregister — это закрывает
+  //    окно гонки с in-flight callback'ом на COM worker thread'е (он
+  //    проверяет alive_ перед обращением к base_->event_channel()).
+  if (mm_notification_client_) {
+    auto alive = mm_notification_client_->alive_handle();
+    if (alive) alive->store(false);
+  }
+  // 2. Снимаем регистрацию. Windows core audio service после этого вызова
+  //    больше не дёргает наш callback. Не строго блокирующий — coll'ы,
+  //    которые уже летят на других thread'ах, увидят alive=false в (1)
+  //    и просто ретурнят без обращения к dying state.
+  if (mm_enumerator_ && mm_notification_client_) {
+    mm_enumerator_->UnregisterEndpointNotificationCallback(
+        mm_notification_client_);
+  }
+  // 3. Release: Windows core audio мог держать свой AddRef — наш Release
+  //    может НЕ быть последним (delete this отложится), это ок.
+  if (mm_notification_client_) {
+    mm_notification_client_->Release();
+    mm_notification_client_ = nullptr;
+  }
+  if (mm_enumerator_) {
+    mm_enumerator_->Release();
+    mm_enumerator_ = nullptr;
+  }
+#endif
 }
 
 void FlutterMediaStream::GetUserMedia(
