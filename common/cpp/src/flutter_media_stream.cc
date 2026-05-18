@@ -783,6 +783,43 @@ void FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
   base_->video_capturers_[track->id().std_string()] = video_capturer;
 }
 
+void FlutterMediaStream::GetActiveAudioDeviceCounts(
+    std::unique_ptr<MethodResultProxy> result) {
+#ifdef _WIN32
+  // Считаем endpoint'ы со state == ACTIVE — это реальная физическая
+  // доступность (BT-disconnect/jack unplug → UNPLUGGED, не считается).
+  auto count_for_flow = [](EDataFlow flow) -> int {
+    EnsureComInitialized();
+    IMMDeviceEnumerator* pEnumerator = nullptr;
+    HRESULT hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
+    if (FAILED(hr) || !pEnumerator) return 0;
+
+    IMMDeviceCollection* pCollection = nullptr;
+    hr = pEnumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE,
+                                          &pCollection);
+    pEnumerator->Release();
+    if (FAILED(hr) || !pCollection) return 0;
+
+    UINT count = 0;
+    pCollection->GetCount(&count);
+    pCollection->Release();
+    return static_cast<int>(count);
+  };
+
+  EncodableMap counts;
+  counts[EncodableValue("audioinput")] =
+      EncodableValue(count_for_flow(eCapture));
+  counts[EncodableValue("audiooutput")] =
+      EncodableValue(count_for_flow(eRender));
+  result->Success(EncodableValue(counts));
+#else
+  // Не-Win — null, Dart делает fallback на enumerate.length.
+  result->Success();
+#endif
+}
+
 void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   EncodableList sources;
 

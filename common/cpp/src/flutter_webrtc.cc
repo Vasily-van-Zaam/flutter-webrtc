@@ -117,6 +117,9 @@ void FlutterWebRTC::HandleMethodCall(
     }
   } else if (method_call.method_name().compare("getSources") == 0) {
     GetSources(std::move(result));
+  } else if (method_call.method_name().compare("getActiveAudioDeviceCounts") ==
+             0) {
+    GetActiveAudioDeviceCounts(std::move(result));
   } else if (method_call.method_name().compare("selectAudioInput") == 0) {
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());

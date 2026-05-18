@@ -73,6 +73,18 @@ class FlutterMediaStream {
 
   void OnDeviceChange();
 
+  // Возвращает в Dart-сторону `{audioinput: N, audiooutput: M}` — где N/M
+  // это число endpoint'ов в **DEVICE_STATE_ACTIVE**. В отличие от
+  // `getSources` (который для UI-stability держит UNPLUGGED BT-endpoint'ы),
+  // этот counter отражает реальную физическую доступность. Используется
+  // в `SipService.refreshAudioDevicesAvailability` для гейтинга dial/UI:
+  // BT-disconnect → UNPLUGGED → этот метод вернёт 0 → баннер «нет
+  // устройств» / disabled dial.
+  //
+  // На не-Win платформах возвращает `null` — Dart-сторона делает fallback
+  // на стандартный enumerate.
+  void GetActiveAudioDeviceCounts(std::unique_ptr<MethodResultProxy> result);
+
  private:
   FlutterWebRTCBase* base_;
 
