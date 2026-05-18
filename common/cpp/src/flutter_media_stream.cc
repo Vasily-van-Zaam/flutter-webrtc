@@ -311,6 +311,16 @@ class MMDeviceNotificationClient : public IMMNotificationClient {
   HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow,
                                                    ERole role,
                                                    LPCWSTR /*deviceId*/) override {
+    // Фильтр: Win шлёт DefaultDeviceChanged ТРИЖДЫ на каждое изменение
+    // (для eConsole=0, eMultimedia=1, eCommunications=2). Нам нужны
+    // только релевантные роли:
+    //   render → eMultimedia (то что показано в UI как «Устройство вывода»),
+    //   capture → eCommunications (что используется для звонков, BT HFP).
+    // eConsole спамит, не несёт информации для нашего use-case.
+    const bool relevant =
+        (flow == eRender && role == eMultimedia) ||
+        (flow == eCapture && role == eCommunications);
+    if (!relevant) return S_OK;
     std::cout << "[FlutterWebRTC] MMNotification: DefaultDeviceChanged flow="
               << flow << " role=" << role << std::endl;
     Emit();
