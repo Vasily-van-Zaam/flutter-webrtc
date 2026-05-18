@@ -151,22 +151,16 @@ int EnumerateWindowsAudioEndpoints(EncodableList& sources,
   // Получаем Windows-default endpoint ДО enumerate чтобы знать какой
   // device поставить первым.
   //
-  // Для call-center приложения используем `eCommunications` для ОБЕИХ
-  // flow (render + capture). Это «устройство для звонков» в Windows
-  // (Sound settings → правый клик → Default Communication Device).
-  // Раньше для render бралось `eMultimedia` (default для музыки) —
-  // это давало split: output = A2DP-BT, input = HFP-2-BT (потому что
-  // eMultimedia для render и eCommunications для capture могут указывать
-  // на разные физические гарнитуры). Когда app открывал HFP capture на
-  // 2-BT, Win BT-stack acquire HFP на 2-BT, освобождал HFP с BT, и
-  // Multimedia default перепрыгивал тоже на 2-BT → весь user-experience
-  // ломался.
-  //
-  // С eCommunications для обоих flow output и input согласованны и
-  // следуют тому что юзер назначил как «устройство для звонков» в Win
-  // Sound settings. Если он не задал явно — Win всё равно возвращает
-  // что-то осмысленное (обычно совпадает с Multimedia).
-  const ERole defaultRole = eCommunications;
+  // Для render используется `eMultimedia` (то что показано в UI как
+  // «Устройство вывода» в Win Sound settings = «By default»). Для capture
+  // — `eCommunications` (то что Win использует для phone-calls, BT HFP).
+  // Это исходное поведение которое корректно auto-switch'ит на Win-side
+  // изменения default'а. Был эксперимент с `eCommunications` для обоих
+  // (предотвратить split при BT-двух-гарнитурах) — но Win обновляет
+  // eMultimedia при user-change в Sound settings, а eCommunications часто
+  // остаётся неизменным → auto-return после возврата устройства не
+  // срабатывал. Откат.
+  const ERole defaultRole = (flow == eRender) ? eMultimedia : eCommunications;
   const std::string defaultId = GetWindowsDefaultEndpointId(flow, defaultRole);
   const std::string sanitizedDefaultId =
       defaultId.empty() ? "" : SanitizeUtf8ForFlutter(defaultId);
@@ -328,15 +322,14 @@ class MMDeviceNotificationClient : public IMMNotificationClient {
                                                    ERole role,
                                                    LPCWSTR /*deviceId*/) override {
     // Фильтр: Win шлёт DefaultDeviceChanged ТРИЖДЫ на каждое изменение
-    // (для eConsole=0, eMultimedia=1, eCommunications=2). Нам нужны
-    // только релевантные роли:
-    //   render → eMultimedia (то что показано в UI как «Устройство вывода»),
-    //   capture → eCommunications (что используется для звонков, BT HFP).
-    // eConsole спамит, не несёт информации для нашего use-case.
-    const bool relevant =
-        (flow == eRender && role == eMultimedia) ||
-        (flow == eCapture && role == eCommunications);
-    if (!relevant) return S_OK;
+    // (для eConsole=0, eMultimedia=1, eCommunications=2). Принимаем
+    // eMultimedia + eCommunications для обоих flow:
+    //   • eCommunications — то что мы используем как default endpoint
+    //     (resolve в _apply*Device для call-сценария);
+    //   • eMultimedia — параллельно меняется через Win Sound Settings
+    //     UI, если юзер вручную переназначил;
+    //   • eConsole — спам, отбрасываем.
+    if (role != eMultimedia && role != eCommunications) return S_OK;
     std::cout << "[FlutterWebRTC] MMNotification: DefaultDeviceChanged flow="
               << flow << " role=" << role << std::endl;
     Emit();
