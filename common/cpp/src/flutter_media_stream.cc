@@ -301,26 +301,44 @@ class MMDeviceNotificationClient : public IMMNotificationClient {
 
   // IMMNotificationClient — все четыре релевантных коллбэка эмитят один и
   // тот же event. Dart дебаунсит серию (500ms) и делает один refresh.
+  //
+  // Логи здесь специально подробные с расшифровкой битмаски state /
+  // PROPERTYKEY — это единственная runtime-видимость в источник
+  // false-positive «нет аудиоустройств» (Win10 кейс: оператор крутит
+  // volume → банер). Если volume действительно эмитит DeviceStateChanged
+  // с не-ACTIVE — мы тут увидим. Если идёт только OnPropertyValueChanged
+  // (без эмита event'а) — false-positive рождается где-то ещё.
   HRESULT STDMETHODCALLTYPE
-  OnDeviceStateChanged(LPCWSTR /*deviceId*/, DWORD newState) override {
-    std::cout << "[FlutterWebRTC] MMNotification: DeviceStateChanged state=0x"
-              << std::hex << newState << std::dec << std::endl;
+  OnDeviceStateChanged(LPCWSTR deviceId, DWORD newState) override {
+    const char* stateName = "UNKNOWN";
+    switch (newState) {
+      case DEVICE_STATE_ACTIVE:     stateName = "ACTIVE";     break;
+      case DEVICE_STATE_DISABLED:   stateName = "DISABLED";   break;
+      case DEVICE_STATE_NOTPRESENT: stateName = "NOTPRESENT"; break;
+      case DEVICE_STATE_UNPLUGGED:  stateName = "UNPLUGGED";  break;
+    }
+    std::cout << "[FlutterWebRTC] MMNotification: DeviceStateChanged"
+              << " state=0x" << std::hex << newState << std::dec
+              << " (" << stateName << ") id=" << WideToUtf8(deviceId)
+              << std::endl;
     Emit();
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR /*deviceId*/) override {
-    std::cout << "[FlutterWebRTC] MMNotification: DeviceAdded" << std::endl;
+  HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR deviceId) override {
+    std::cout << "[FlutterWebRTC] MMNotification: DeviceAdded id="
+              << WideToUtf8(deviceId) << std::endl;
     Emit();
     return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR /*deviceId*/) override {
-    std::cout << "[FlutterWebRTC] MMNotification: DeviceRemoved" << std::endl;
+  HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR deviceId) override {
+    std::cout << "[FlutterWebRTC] MMNotification: DeviceRemoved id="
+              << WideToUtf8(deviceId) << std::endl;
     Emit();
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow,
                                                    ERole role,
-                                                   LPCWSTR /*deviceId*/) override {
+                                                   LPCWSTR deviceId) override {
     // Фильтр: Win шлёт DefaultDeviceChanged ТРИЖДЫ на каждое изменение
     // (для eConsole=0, eMultimedia=1, eCommunications=2). Принимаем
     // eMultimedia + eCommunications для обоих flow:
@@ -329,16 +347,50 @@ class MMDeviceNotificationClient : public IMMNotificationClient {
     //   • eMultimedia — параллельно меняется через Win Sound Settings
     //     UI, если юзер вручную переназначил;
     //   • eConsole — спам, отбрасываем.
-    if (role != eMultimedia && role != eCommunications) return S_OK;
-    std::cout << "[FlutterWebRTC] MMNotification: DefaultDeviceChanged flow="
-              << flow << " role=" << role << std::endl;
+    const char* flowName = (flow == eRender) ? "eRender"
+                          : (flow == eCapture) ? "eCapture"
+                          : "eAll";
+    const char* roleName = (role == eConsole) ? "eConsole"
+                          : (role == eMultimedia) ? "eMultimedia"
+                          : (role == eCommunications) ? "eCommunications"
+                          : "?";
+    if (role != eMultimedia && role != eCommunications) {
+      std::cout << "[FlutterWebRTC] MMNotification: DefaultDeviceChanged"
+                << " flow=" << flowName << " role=" << roleName
+                << " id=" << WideToUtf8(deviceId)
+                << " (filtered — eConsole spam)" << std::endl;
+      return S_OK;
+    }
+    std::cout << "[FlutterWebRTC] MMNotification: DefaultDeviceChanged"
+              << " flow=" << flowName << " role=" << roleName
+              << " id=" << WideToUtf8(deviceId) << std::endl;
     Emit();
     return S_OK;
   }
   HRESULT STDMETHODCALLTYPE
-  OnPropertyValueChanged(LPCWSTR /*deviceId*/, const PROPERTYKEY /*key*/) override {
-    // Спамит на каждый property update (volume, format change, etc) — нам
-    // это не нужно, audio-device-state мы получаем через State/Added/Removed.
+  OnPropertyValueChanged(LPCWSTR deviceId, const PROPERTYKEY key) override {
+    // НЕ эмитим event — audio-device-state мы получаем через
+    // State/Added/Removed. НО логируем (один раз на тип ключа, без
+    // spam'а): нужно подтвердить что volume / mute и НЕ шлют
+    // OnDeviceStateChanged — это исключит эту ветку как источник
+    // false-positive «нет устройств».
+    //
+    // Чтобы не спамить на каждый tick volume slider'а, фильтруем по
+    // известным ключам и логируем только volume/mute/format/disable.
+    const char* keyName = nullptr;
+    if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_Volume))
+      keyName = "Volume";
+    else if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_Mute))
+      keyName = "Mute";
+    else if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_Disable_SysFx))
+      keyName = "Disable_SysFx";
+    else if (IsEqualPropertyKey(key, PKEY_AudioEngine_DeviceFormat))
+      keyName = "DeviceFormat";
+    if (keyName != nullptr) {
+      std::cout << "[FlutterWebRTC] MMNotification: PropertyValueChanged"
+                << " key=" << keyName << " id=" << WideToUtf8(deviceId)
+                << " (NOT emitting onDeviceChange)" << std::endl;
+    }
     return S_OK;
   }
 
@@ -761,31 +813,91 @@ void FlutterMediaStream::GetActiveAudioDeviceCounts(
 #ifdef _WIN32
   // Считаем endpoint'ы со state == ACTIVE — это реальная физическая
   // доступность (BT-disconnect/jack unplug → UNPLUGGED, не считается).
-  auto count_for_flow = [](EDataFlow flow) -> int {
+  //
+  // Логи: на каждый вызов печатаем список endpoints с расшифровкой их
+  // state и friendly-name. Это даёт runtime ответ на вопрос «почему
+  // count=0 если устройство физически на месте» — например, Win
+  // показывает state=DISABLED при глобальном privacy-toggle, или
+  // device просто DISABLED в Sound Settings. Без этого лога мы
+  // диагностируем «вслепую».
+  auto count_for_flow = [](EDataFlow flow, const char* label) -> int {
     EnsureComInitialized();
     IMMDeviceEnumerator* pEnumerator = nullptr;
     HRESULT hr = CoCreateInstance(
         __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
         __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
-    if (FAILED(hr) || !pEnumerator) return 0;
+    if (FAILED(hr) || !pEnumerator) {
+      std::cout << "[FlutterWebRTC] getActiveAudioDeviceCounts[" << label
+                << "] CoCreate(MMDeviceEnumerator) failed hr=0x"
+                << std::hex << hr << std::dec << std::endl;
+      return 0;
+    }
 
+    // Берём ACTIVE+DISABLED+UNPLUGGED — чтобы залогировать ВСЕ endpoints
+    // с их state'ом. Counter в return фильтрует уже после лога.
     IMMDeviceCollection* pCollection = nullptr;
-    hr = pEnumerator->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE,
-                                          &pCollection);
+    hr = pEnumerator->EnumAudioEndpoints(
+        flow,
+        DEVICE_STATE_ACTIVE | DEVICE_STATE_DISABLED | DEVICE_STATE_UNPLUGGED |
+            DEVICE_STATE_NOTPRESENT,
+        &pCollection);
     pEnumerator->Release();
-    if (FAILED(hr) || !pCollection) return 0;
+    if (FAILED(hr) || !pCollection) {
+      std::cout << "[FlutterWebRTC] getActiveAudioDeviceCounts[" << label
+                << "] EnumAudioEndpoints failed hr=0x" << std::hex << hr
+                << std::dec << std::endl;
+      return 0;
+    }
 
-    UINT count = 0;
-    pCollection->GetCount(&count);
+    UINT total = 0;
+    pCollection->GetCount(&total);
+    int active = 0;
+    for (UINT i = 0; i < total; ++i) {
+      IMMDevice* pDevice = nullptr;
+      if (FAILED(pCollection->Item(i, &pDevice)) || !pDevice) continue;
+      DWORD state = 0;
+      pDevice->GetState(&state);
+      const char* stateName = (state == DEVICE_STATE_ACTIVE) ? "ACTIVE"
+                              : (state == DEVICE_STATE_DISABLED) ? "DISABLED"
+                              : (state == DEVICE_STATE_NOTPRESENT) ? "NOTPRESENT"
+                              : (state == DEVICE_STATE_UNPLUGGED) ? "UNPLUGGED"
+                              : "?";
+      std::string friendly = "<unknown>";
+      IPropertyStore* pProps = nullptr;
+      if (SUCCEEDED(pDevice->OpenPropertyStore(STGM_READ, &pProps)) &&
+          pProps) {
+        PROPVARIANT varName;
+        PropVariantInit(&varName);
+        if (SUCCEEDED(pProps->GetValue(PKEY_Device_FriendlyName, &varName)) &&
+            varName.vt == VT_LPWSTR) {
+          friendly = WideToUtf8(varName.pwszVal);
+        }
+        PropVariantClear(&varName);
+        pProps->Release();
+      }
+      LPWSTR pId = nullptr;
+      std::string idStr;
+      if (SUCCEEDED(pDevice->GetId(&pId)) && pId) {
+        idStr = WideToUtf8(pId);
+        CoTaskMemFree(pId);
+      }
+      std::cout << "[FlutterWebRTC] getActiveAudioDeviceCounts[" << label
+                << "] i=" << i << " state=" << stateName
+                << " name=\"" << friendly << "\" id=" << idStr << std::endl;
+      if (state == DEVICE_STATE_ACTIVE) ++active;
+      pDevice->Release();
+    }
     pCollection->Release();
-    return static_cast<int>(count);
+    std::cout << "[FlutterWebRTC] getActiveAudioDeviceCounts[" << label
+              << "] total=" << total << " active=" << active << std::endl;
+    return active;
   };
 
   EncodableMap counts;
   counts[EncodableValue("audioinput")] =
-      EncodableValue(count_for_flow(eCapture));
+      EncodableValue(count_for_flow(eCapture, "capture"));
   counts[EncodableValue("audiooutput")] =
-      EncodableValue(count_for_flow(eRender));
+      EncodableValue(count_for_flow(eRender, "render"));
   result->Success(EncodableValue(counts));
 #else
   // Не-Win — null, Dart делает fallback на enumerate.length.
