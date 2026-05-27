@@ -30,3 +30,4 @@ migrate_working_dir/
 .flutter-plugins-dependencies
 build/
 third_party/libwebrtc/lib/**/*.lib
+third_party/libwebrtc/webrtc-sdk/

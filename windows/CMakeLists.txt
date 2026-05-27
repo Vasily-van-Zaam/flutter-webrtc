@@ -13,10 +13,22 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/CMakeLists.txt")
 # not be changed
 set(PLUGIN_NAME "flutter_webrtc_plugin")
 
-add_definitions(-DLIB_WEBRTC_API_DLL)
+#add_definitions(-DLIB_WEBRTC_API_DLL)
 add_definitions(-DRTC_DESKTOP_DEVICE)
+add_definitions(-DWEBRTC_WIN)
+add_definitions(-DLIB_WEBRTC_API_EXPORTS)
+add_definitions(-DWEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE)
+
+# ── webrtc-sdk (C++ wrapper around vanilla libwebrtc) ──────────────────────
+set(WEBRTC_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk")
+
+file(GLOB_RECURSE WEBRTC_SDK_SOURCES "${WEBRTC_SDK_DIR}/src/*.cc")
+
+# Exclude Intel Media SDK files — we don't use them
+list(FILTER WEBRTC_SDK_SOURCES EXCLUDE REGEX "win/msdk|win/mediacapabilit|win/mediautil|win/codec|win/sysmem|win/d3d|win/base_alloc")
 
 add_library(${PLUGIN_NAME} SHARED
+  # Flutter plugin sources
   "../common/cpp/src/flutter_common.cc"
   "../common/cpp/src/flutter_data_channel.cc"
   "../common/cpp/src/flutter_data_packet_cryptor.cc"
@@ -32,6 +44,8 @@ add_library(${PLUGIN_NAME} SHARED
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
   "audio_session_naming.cc"
+  # webrtc-sdk sources
+  ${WEBRTC_SDK_SOURCES}
 )
 
 include_directories(
@@ -39,6 +53,11 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
+  "${WEBRTC_SDK_DIR}"
+  "${WEBRTC_SDK_DIR}/include"
+  "${WEBRTC_SDK_DIR}/src"
+  "${WEBRTC_SDK_DIR}/src/base"
+  "${WEBRTC_SDK_DIR}/src/internal"
 )
 
 apply_standard_settings(${PLUGIN_NAME})
@@ -49,6 +68,7 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
+  "${WEBRTC_SDK_DIR}/include"
 )
 target_link_libraries(${PLUGIN_NAME} PRIVATE 
   flutter
