@@ -63,6 +63,46 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
     return @{};
 }
 
+static BOOL resolveAudioProcessingFlag(NSDictionary* audioMap,
+                                       NSString* modernKey,
+                                       NSString* legacyKey,
+                                       BOOL defaultValue) {
+  id modern = audioMap[modernKey];
+  if ([modern isKindOfClass:[NSNumber class]]) {
+    return [modern boolValue];
+  }
+  id mandatoryObj = audioMap[@"mandatory"];
+  if ([mandatoryObj isKindOfClass:[NSDictionary class]]) {
+    NSDictionary* mandatory = (NSDictionary*)mandatoryObj;
+    id legacy = mandatory[legacyKey];
+    if ([legacy isKindOfClass:[NSNumber class]]) {
+      return [legacy boolValue];
+    }
+    id modernMandatory = mandatory[modernKey];
+    if ([modernMandatory isKindOfClass:[NSNumber class]]) {
+      return [modernMandatory boolValue];
+    }
+  }
+  id optionalObj = audioMap[@"optional"];
+  if ([optionalObj isKindOfClass:[NSArray class]]) {
+    for (id item in (NSArray*)optionalObj) {
+      if (![item isKindOfClass:[NSDictionary class]]) {
+        continue;
+      }
+      NSDictionary* option = (NSDictionary*)item;
+      id legacy = option[legacyKey];
+      if ([legacy isKindOfClass:[NSNumber class]]) {
+        return [legacy boolValue];
+      }
+      id modernOptional = option[modernKey];
+      if ([modernOptional isKindOfClass:[NSNumber class]]) {
+        return [modernOptional boolValue];
+      }
+    }
+  }
+  return defaultValue;
+}
+
 
 - (RTCMediaConstraints*)defaultMediaStreamConstraints {
   RTCMediaConstraints* constraints =
@@ -177,12 +217,29 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   RTCAudioTrack* audioTrack = [self.peerConnectionFactory audioTrackWithSource:audioSource trackId:trackId];
   LocalAudioTrack *localAudioTrack = [[LocalAudioTrack alloc] initWithTrack:audioTrack];
 
+  BOOL agcEnabled = YES;
+  BOOL echoEnabled = YES;
+  BOOL noiseEnabled = YES;
+  if ([audioConstraints isKindOfClass:[NSDictionary class]]) {
+    NSDictionary* audioMap = (NSDictionary*)audioConstraints;
+    agcEnabled = resolveAudioProcessingFlag(
+        audioMap, @"autoGainControl", @"googAutoGainControl", YES);
+    echoEnabled = resolveAudioProcessingFlag(
+        audioMap, @"echoCancellation", @"googEchoCancellation", YES);
+    noiseEnabled = resolveAudioProcessingFlag(
+        audioMap, @"noiseSuppression", @"googNoiseSuppression", YES);
+  }
+  NSLog(@"[AudioConstraints] native GetUserAudio AGC=%@ EchoCancellation=%@ NoiseSuppression=%@",
+        agcEnabled ? @"true" : @"false",
+        echoEnabled ? @"true" : @"false",
+        noiseEnabled ? @"true" : @"false");
+
   audioTrack.settings = @{
     @"deviceId" : audioDeviceId,
     @"kind" : @"audioinput",
-    @"autoGainControl" : @YES,
-    @"echoCancellation" : @YES,
-    @"noiseSuppression" : @YES,
+    @"autoGainControl" : @(agcEnabled),
+    @"echoCancellation" : @(echoEnabled),
+    @"noiseSuppression" : @(noiseEnabled),
     @"channelCount" : @1,
     @"latency" : @0,
   };
