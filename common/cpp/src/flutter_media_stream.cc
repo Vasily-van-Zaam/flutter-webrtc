@@ -81,15 +81,6 @@ void FlutterMediaStream::GetUserMedia(
   result->Success(EncodableValue(params));
 }
 
-void addDefaultAudioConstraints(
-    scoped_refptr<RTCMediaConstraints> audioConstraints) {
-  audioConstraints->AddOptionalConstraint("googNoiseSuppression", "true");
-  audioConstraints->AddOptionalConstraint("googEchoCancellation", "true");
-  audioConstraints->AddOptionalConstraint("echoCancellation", "true");
-  audioConstraints->AddOptionalConstraint("googEchoCancellation2", "true");
-  audioConstraints->AddOptionalConstraint("googDAEchoCancellation", "true");
-}
-
 std::string getSourceIdConstraint(const EncodableMap& mediaConstraints) {
   auto it = mediaConstraints.find(EncodableValue("optional"));
   if (it != mediaConstraints.end() && TypeIs<EncodableList>(it->second)) {
@@ -115,19 +106,92 @@ std::string getDeviceIdConstraint(const EncodableMap& mediaConstraints) {
   return "";
 }
 
+bool hasBoolInMap(const EncodableMap& map, const std::string& key) {
+  auto it = map.find(EncodableValue(key));
+  return it != map.end() && TypeIs<bool>(it->second);
+}
+
+bool getBoolFromMap(const EncodableMap& map, const std::string& key) {
+  auto it = map.find(EncodableValue(key));
+  if (it != map.end() && TypeIs<bool>(it->second)) {
+    return GetValue<bool>(it->second);
+  }
+  return false;
+}
+
+// Resolve AGC/AEC/NS from modern top-level keys and legacy mandatory/optional
+// goog* keys (same shape as client_apps AppSetting.audioProcessingConstraints).
+bool resolveAudioProcessingFlag(const EncodableMap& audio_map,
+                                  const std::string& modern_key,
+                                  const std::string& legacy_key,
+                                  bool default_value) {
+  if (hasBoolInMap(audio_map, modern_key)) {
+    return getBoolFromMap(audio_map, modern_key);
+  }
+  auto mandatory_it = audio_map.find(EncodableValue("mandatory"));
+  if (mandatory_it != audio_map.end() &&
+      TypeIs<EncodableMap>(mandatory_it->second)) {
+    EncodableMap mandatory = GetValue<EncodableMap>(mandatory_it->second);
+    if (hasBoolInMap(mandatory, legacy_key)) {
+      return getBoolFromMap(mandatory, legacy_key);
+    }
+    if (hasBoolInMap(mandatory, modern_key)) {
+      return getBoolFromMap(mandatory, modern_key);
+    }
+  }
+  auto optional_it = audio_map.find(EncodableValue("optional"));
+  if (optional_it != audio_map.end() &&
+      TypeIs<EncodableList>(optional_it->second)) {
+    EncodableList optional = GetValue<EncodableList>(optional_it->second);
+    for (size_t i = 0; i < optional.size(); i++) {
+      if (!TypeIs<EncodableMap>(optional[i])) {
+        continue;
+      }
+      EncodableMap option = GetValue<EncodableMap>(optional[i]);
+      if (hasBoolInMap(option, legacy_key)) {
+        return getBoolFromMap(option, legacy_key);
+      }
+      if (hasBoolInMap(option, modern_key)) {
+        return getBoolFromMap(option, modern_key);
+      }
+    }
+  }
+  return default_value;
+}
+
+libwebrtc::RTCAudioOptions buildAudioOptionsFromConstraints(
+    const EncodableMap& audio_map) {
+  libwebrtc::RTCAudioOptions options;
+  options.auto_gain_control = resolveAudioProcessingFlag(
+      audio_map, "autoGainControl", "googAutoGainControl", true);
+  options.echo_cancellation = resolveAudioProcessingFlag(
+      audio_map, "echoCancellation", "googEchoCancellation", true);
+  options.noise_suppression = resolveAudioProcessingFlag(
+      audio_map, "noiseSuppression", "googNoiseSuppression", true);
+  return options;
+}
+
+void logNativeAudioOptions(const libwebrtc::RTCAudioOptions& options) {
+  std::cout << "[AudioConstraints] native GetUserAudio "
+            << "AGC=" << (options.auto_gain_control ? "true" : "false")
+            << " EchoCancellation="
+            << (options.echo_cancellation ? "true" : "false")
+            << " NoiseSuppression="
+            << (options.noise_suppression ? "true" : "false") << std::endl;
+}
+
 void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
                                       scoped_refptr<RTCMediaStream> stream,
                                       EncodableMap& params) {
   bool enable_audio = false;
-  scoped_refptr<RTCMediaConstraints> audioConstraints;
+  libwebrtc::RTCAudioOptions audio_options;
   std::string sourceId;
   std::string deviceId;
   auto it = constraints.find(EncodableValue("audio"));
   if (it != constraints.end()) {
     EncodableValue audio = it->second;
     if (TypeIs<bool>(audio)) {
-      audioConstraints = RTCMediaConstraints::Create();
-      addDefaultAudioConstraints(audioConstraints);
+      audio_options = libwebrtc::RTCAudioOptions();
       enable_audio = GetValue<bool>(audio);
       sourceId = "";
       deviceId = "";
@@ -136,7 +200,7 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
       EncodableMap localMap = GetValue<EncodableMap>(audio);
       sourceId = getSourceIdConstraint(localMap);
       deviceId = getDeviceIdConstraint(localMap);
-      audioConstraints = base_->ParseMediaConstraints(localMap);
+      audio_options = buildAudioOptionsFromConstraints(localMap);
       enable_audio = true;
     }
   }
@@ -181,8 +245,10 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
       }
     }
 
-    scoped_refptr<RTCAudioSource> source =
-        base_->factory_->CreateAudioSource("audio_input");
+    logNativeAudioOptions(audio_options);
+    scoped_refptr<RTCAudioSource> source = base_->factory_->CreateAudioSource(
+        "audio_input", libwebrtc::RTCAudioSource::SourceType::kMicrophone,
+        audio_options);
     std::string uuid = base_->GenerateUUID();
     scoped_refptr<RTCAudioTrack> track =
         base_->factory_->CreateAudioTrack(source, uuid.c_str());
@@ -201,9 +267,12 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
     settings[EncodableValue("deviceId")] =
         EncodableValue(SanitizeUtf8ForFlutter(sourceId));
     settings[EncodableValue("kind")] = EncodableValue("audioinput");
-    settings[EncodableValue("autoGainControl")] = EncodableValue(true);
-    settings[EncodableValue("echoCancellation")] = EncodableValue(true);
-    settings[EncodableValue("noiseSuppression")] = EncodableValue(true);
+    settings[EncodableValue("autoGainControl")] =
+        EncodableValue(audio_options.auto_gain_control);
+    settings[EncodableValue("echoCancellation")] =
+        EncodableValue(audio_options.echo_cancellation);
+    settings[EncodableValue("noiseSuppression")] =
+        EncodableValue(audio_options.noise_suppression);
     settings[EncodableValue("channelCount")] = EncodableValue(1);
     settings[EncodableValue("latency")] = EncodableValue(0);
     track_info[EncodableValue("settings")] = EncodableValue(settings);
