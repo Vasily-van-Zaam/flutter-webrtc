@@ -13,22 +13,10 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/CMakeLists.txt")
 # not be changed
 set(PLUGIN_NAME "flutter_webrtc_plugin")
 
-#add_definitions(-DLIB_WEBRTC_API_DLL)
+add_definitions(-DLIB_WEBRTC_API_DLL)
 add_definitions(-DRTC_DESKTOP_DEVICE)
-add_definitions(-DWEBRTC_WIN)
-add_definitions(-DLIB_WEBRTC_API_EXPORTS)
-add_definitions(-DWEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE)
-
-# ── webrtc-sdk (C++ wrapper around vanilla libwebrtc) ──────────────────────
-set(WEBRTC_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk")
-
-file(GLOB_RECURSE WEBRTC_SDK_SOURCES "${WEBRTC_SDK_DIR}/src/*.cc")
-
-# Exclude Intel Media SDK files — we don't use them
-list(FILTER WEBRTC_SDK_SOURCES EXCLUDE REGEX "win/msdk|win/mediacapabilit|win/mediautil|win/codec|win/sysmem|win/d3d|win/base_alloc")
 
 add_library(${PLUGIN_NAME} SHARED
-  # Flutter plugin sources
   "../common/cpp/src/flutter_common.cc"
   "../common/cpp/src/flutter_data_channel.cc"
   "../common/cpp/src/flutter_data_packet_cryptor.cc"
@@ -44,8 +32,6 @@ add_library(${PLUGIN_NAME} SHARED
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
   "audio_session_naming.cc"
-  # webrtc-sdk sources
-  ${WEBRTC_SDK_SOURCES}
 )
 
 include_directories(
@@ -53,11 +39,6 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
-  "${WEBRTC_SDK_DIR}"
-  "${WEBRTC_SDK_DIR}/include"
-  "${WEBRTC_SDK_DIR}/src"
-  "${WEBRTC_SDK_DIR}/src/base"
-  "${WEBRTC_SDK_DIR}/src/internal"
 )
 
 apply_standard_settings(${PLUGIN_NAME})
@@ -68,17 +49,33 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
-  "${WEBRTC_SDK_DIR}/include"
 )
 target_link_libraries(${PLUGIN_NAME} PRIVATE 
   flutter
   flutter_wrapper_plugin
-  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/webrtc.lib"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll.lib"
 )
 
-# CoreAudio2 (WASAPI) ADM: libwebrtc статически слинкован в flutter_webrtc_plugin.dll.
-# Отдельная libwebrtc.dll не нужна.
+# List of absolute paths to libraries that should be bundled with the plugin.
+#
+# ВАЖНО: резолвим путь через `get_filename_component(... ABSOLUTE)`,
+# чтобы получить нормализованный canonical путь напрямую в pub-cache
+# (без `..` через symlink). Дефолтный шаблон писал
+# `${CMAKE_CURRENT_SOURCE_DIR}/../third_party/...`, и при подмешивании
+# в `PLUGIN_BUNDLED_LIBRARIES` основного проекта это разворачивается в
+# `.../plugin_symlinks/flutter_webrtc/windows/../third_party/.../
+# libwebrtc.dll`. CMake `file(INSTALL FILES ...)` пытается резолвить
+# `..` через symlink — на Windows это даёт false-negative и install
+# падает с «file INSTALL cannot find ...libwebrtc.dll».
+#
+# Через `ABSOLUTE` получаем настоящий путь в pub-cache (например
+# `C:/Users/<user>/AppData/Local/Pub/Cache/git/flutter-webrtc-<hash>/
+# third_party/libwebrtc/lib/win64/libwebrtc.dll`), `..` и symlink
+# из install destination'а исчезают, копирование работает.
+get_filename_component(_libwebrtc_dll_abs
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll"
+  ABSOLUTE)
 set(flutter_webrtc_bundled_libraries
-  ""
+  "${_libwebrtc_dll_abs}"
   PARENT_SCOPE
 )
