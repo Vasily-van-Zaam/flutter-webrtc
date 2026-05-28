@@ -4,10 +4,52 @@
 #include "flutter_peerconnection.h"
 
 #include "helper.h"
+#include <iostream>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace flutter_webrtc_plugin {
 
 const char* kEventChannelName = "FlutterWebRTC.Event";
+
+#ifdef _WIN32
+namespace {
+bool IsModuleLoaded(const wchar_t* module_name) {
+  return GetModuleHandleW(module_name) != nullptr;
+}
+
+void LogWindowsAudioBackendModules() {
+  const bool has_mmdevapi = IsModuleLoaded(L"mmdevapi.dll");
+  const bool has_audioclient = IsModuleLoaded(L"audioclient.dll");
+  const bool has_mf = IsModuleLoaded(L"mf.dll");
+  const bool has_mfplat = IsModuleLoaded(L"mfplat.dll");
+  const bool has_mfreadwrite = IsModuleLoaded(L"mfreadwrite.dll");
+  const bool has_mfuuid = IsModuleLoaded(L"mfuuid.dll");
+
+  std::cout << "[FlutterWebRTC] Audio backend probe:"
+            << " mmdevapi=" << has_mmdevapi
+            << " audioclient=" << has_audioclient
+            << " mf=" << has_mf
+            << " mfplat=" << has_mfplat
+            << " mfreadwrite=" << has_mfreadwrite
+            << " mfuuid=" << has_mfuuid << std::endl;
+
+  if (has_mmdevapi && has_audioclient && !has_mf && !has_mfplat &&
+      !has_mfreadwrite) {
+    std::cout << "[FlutterWebRTC] Audio backend probe result: likely WASAPI/CoreAudio2 path"
+              << std::endl;
+  } else if (has_mf || has_mfplat || has_mfreadwrite) {
+    std::cout << "[FlutterWebRTC] Audio backend probe result: Media Foundation modules are loaded"
+              << std::endl;
+  } else {
+    std::cout << "[FlutterWebRTC] Audio backend probe result: unknown (check modules during active call)"
+              << std::endl;
+  }
+}
+}  // namespace
+#endif
 
 FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
                                      TextureRegistrar* textures,
@@ -21,6 +63,9 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
   desktop_device_ = factory_->GetDesktopDevice();
   audio_processing_ = factory_->GetAudioProcessing();
   event_channel_ = EventChannelProxy::Create(messenger_, task_runner_, kEventChannelName);
+#ifdef _WIN32
+  LogWindowsAudioBackendModules();
+#endif
 }
 
 FlutterWebRTCBase::~FlutterWebRTCBase() {

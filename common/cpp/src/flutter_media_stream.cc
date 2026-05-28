@@ -377,20 +377,10 @@ class MMDeviceNotificationClient : public IMMNotificationClient {
     //
     // Чтобы не спамить на каждый tick volume slider'а, фильтруем по
     // известным ключам и логируем только volume/mute/format/disable.
-    const char* keyName = nullptr;
-    if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_Volume))
-      keyName = "Volume";
-    else if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_Mute))
-      keyName = "Mute";
-    else if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_Disable_SysFx))
-      keyName = "Disable_SysFx";
-    else if (IsEqualPropertyKey(key, PKEY_AudioEngine_DeviceFormat))
-      keyName = "DeviceFormat";
-    if (keyName != nullptr) {
-      std::cout << "[FlutterWebRTC] MMNotification: PropertyValueChanged"
-                << " key=" << keyName << " id=" << WideToUtf8(deviceId)
-                << " (NOT emitting onDeviceChange)" << std::endl;
-    }
+    std::cout << "[FlutterWebRTC] MMNotification: PropertyValueChanged"
+              << " key={" << key.fmtid.Data1 << "-" << key.pid << "}"
+              << " id=" << WideToUtf8(deviceId)
+              << " (NOT emitting onDeviceChange)" << std::endl;
     return S_OK;
   }
 
