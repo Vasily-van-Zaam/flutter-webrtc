@@ -18,6 +18,10 @@ set(PLUGIN_NAME "flutter_webrtc_plugin")
 add_definitions(-DRTC_DESKTOP_DEVICE)
 add_definitions(-DWEBRTC_WIN)
 add_definitions(-DWEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE)
+# Prevent windows.h from defining min/max macros that conflict with
+# std::min/std::max and winsock.h/winsock2.h redefinition errors.
+add_definitions(-DNOMINMAX)
+add_definitions(-DWIN32_LEAN_AND_MEAN)
 
 add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_common.cc"
@@ -62,10 +66,7 @@ add_library(${PLUGIN_NAME} SHARED
   "../third_party/libwebrtc/webrtc-sdk/src/rtc_video_frame_impl.cc"
   "../third_party/libwebrtc/webrtc-sdk/src/rtc_video_sink_adapter.cc"
   "../third_party/libwebrtc/webrtc-sdk/src/rtc_desktop_device_impl.cc"
-  "../third_party/libwebrtc/webrtc-sdk/src/rtc_desktop_capturer_impl.cc"
   "../third_party/libwebrtc/webrtc-sdk/src/rtc_desktop_media_list_impl.cc"
-  "../third_party/libwebrtc/webrtc-sdk/src/rtc_frame_cryptor_impl.cc"
-  "../third_party/libwebrtc/webrtc-sdk/src/rtc_data_packet_cryptor_impl.cc"
   "../third_party/libwebrtc/webrtc-sdk/src/internal/custom_audio_transport_impl.cc"
 )
 
@@ -75,6 +76,7 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
   # webrtc-sdk headers
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src/base"
