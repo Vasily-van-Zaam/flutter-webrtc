@@ -80,6 +80,9 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src/base"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src/internal"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src/desktop"
+  # Libwebrtc full source tree (needed for SDK internal #include: api/, modules/, rtc_base/)
+  "C:/PROJECTS/webrtc_build/src"
+  "C:/PROJECTS/webrtc_build/src/third_party/abseil-cpp"
 )
 
 apply_standard_settings(${PLUGIN_NAME})
