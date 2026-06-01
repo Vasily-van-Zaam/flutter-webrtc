@@ -1054,7 +1054,17 @@ void FlutterMediaStream::SelectAudioOutput(
     std::cout << "[FlutterWebRTC] selectAudioOutput: default/empty deviceId"
               << " — skipping (label=\"" << label
               << "\" force=" << force_try_set << ")" << std::endl;
-    result->Success();
+    EncodableMap info;
+    info[EncodableValue("matched")] = EncodableValue(false);
+    info[EncodableValue("matchedBy")] = EncodableValue("default");
+    info[EncodableValue("appliedIndex")] = EncodableValue(-1);
+    info[EncodableValue("rc")] = EncodableValue(0);
+    info[EncodableValue("deviceId")] = EncodableValue("");
+    info[EncodableValue("label")] = EncodableValue("system_default");
+    info[EncodableValue("forceRequested")] = EncodableValue(force_try_set);
+    info[EncodableValue("remark")] = EncodableValue(
+        "empty/default deviceId — ADM follows system default");
+    result->Success(EncodableValue(info));
     return;
   }
   const int playout_devices = base_->audio_device_->PlayoutDevices();
@@ -1067,6 +1077,7 @@ void FlutterMediaStream::SelectAudioOutput(
   char deviceGuid[256];
   uint16_t matched_index = 0;
   bool found = false;
+  std::string matched_by;
   // Primary match — по device_id (sanitized name+guid). На Win совпадает
   // с тем что Dart-side получает через `enumerateDevices`, должен
   // работать out-of-the-box.
@@ -1080,6 +1091,7 @@ void FlutterMediaStream::SelectAudioOutput(
     if (device_id == cur_device_id) {
       matched_index = i;
       found = true;
+      matched_by = "deviceId";
       std::cout << "[FlutterWebRTC]   out matched by deviceId → i=" << i
                 << std::endl;
       break;
@@ -1093,6 +1105,7 @@ void FlutterMediaStream::SelectAudioOutput(
       if (label == std::string(deviceName)) {
         matched_index = i;
         found = true;
+        matched_by = "label";
         std::cout << "[FlutterWebRTC]   out matched by label → i=" << i
                   << " name=\"" << deviceName << "\"" << std::endl;
         break;
@@ -1106,7 +1119,17 @@ void FlutterMediaStream::SelectAudioOutput(
     std::cout << "[FlutterWebRTC]   out NOT matched, falling back to "
                  "system default"
               << std::endl;
-    result->Success();
+    EncodableMap info;
+    info[EncodableValue("matched")] = EncodableValue(false);
+    info[EncodableValue("matchedBy")] = EncodableValue("not_found");
+    info[EncodableValue("appliedIndex")] = EncodableValue(-1);
+    info[EncodableValue("rc")] = EncodableValue(-1);
+    info[EncodableValue("deviceId")] = EncodableValue(device_id);
+    info[EncodableValue("label")] = EncodableValue(label);
+    info[EncodableValue("forceRequested")] = EncodableValue(force_try_set);
+    info[EncodableValue("remark")] = EncodableValue(
+        "NOT matched in ADM enumeration — falling back to system default");
+    result->Success(EncodableValue(info));
     return;
   }
   // force_try_set пока не имеет специального обработчика на Win —
@@ -1120,7 +1143,17 @@ void FlutterMediaStream::SelectAudioOutput(
   std::cout << "[FlutterWebRTC] SetPlayoutDevice(" << matched_index
             << ") rc=" << rc << " (force=" << force_try_set << ")"
             << std::endl;
-  result->Success();
+  EncodableMap info;
+  info[EncodableValue("matched")] = EncodableValue(true);
+  info[EncodableValue("matchedBy")] = EncodableValue(matched_by);
+  info[EncodableValue("appliedIndex")] = EncodableValue(
+      static_cast<int64_t>(matched_index));
+  info[EncodableValue("rc")] = EncodableValue(static_cast<int64_t>(rc));
+  info[EncodableValue("deviceId")] = EncodableValue(device_id);
+  info[EncodableValue("label")] = EncodableValue(label);
+  info[EncodableValue("forceRequested")] = EncodableValue(force_try_set);
+  info[EncodableValue("remark")] = EncodableValue("");
+  result->Success(EncodableValue(info));
 }
 
 void FlutterMediaStream::SelectAudioInput(
@@ -1138,7 +1171,17 @@ void FlutterMediaStream::SelectAudioInput(
     std::cout << "[FlutterWebRTC] selectAudioInput: default/empty deviceId"
               << " — skipping (label=\"" << label
               << "\" force=" << force_try_set << ")" << std::endl;
-    result->Success();
+    EncodableMap info;
+    info[EncodableValue("matched")] = EncodableValue(false);
+    info[EncodableValue("matchedBy")] = EncodableValue("default");
+    info[EncodableValue("appliedIndex")] = EncodableValue(-1);
+    info[EncodableValue("rc")] = EncodableValue(0);
+    info[EncodableValue("deviceId")] = EncodableValue("");
+    info[EncodableValue("label")] = EncodableValue("system_default");
+    info[EncodableValue("forceRequested")] = EncodableValue(force_try_set);
+    info[EncodableValue("remark")] = EncodableValue(
+        "empty/default deviceId — ADM follows system default");
+    result->Success(EncodableValue(info));
     return;
   }
   const int recording_devices = base_->audio_device_->RecordingDevices();
@@ -1151,6 +1194,7 @@ void FlutterMediaStream::SelectAudioInput(
   char deviceGuid[256];
   uint16_t matched_index = 0;
   bool found = false;
+  std::string matched_by;
   for (uint16_t i = 0; i < recording_devices; i++) {
     base_->audio_device_->RecordingDeviceName(i, deviceName, deviceGuid);
     std::string cur_device_id =
@@ -1161,6 +1205,7 @@ void FlutterMediaStream::SelectAudioInput(
     if (device_id == cur_device_id) {
       matched_index = i;
       found = true;
+      matched_by = "deviceId";
       std::cout << "[FlutterWebRTC]   in matched by deviceId → i=" << i
                 << std::endl;
       break;
@@ -1172,6 +1217,7 @@ void FlutterMediaStream::SelectAudioInput(
       if (label == std::string(deviceName)) {
         matched_index = i;
         found = true;
+        matched_by = "label";
         std::cout << "[FlutterWebRTC]   in matched by label → i=" << i
                   << " name=\"" << deviceName << "\"" << std::endl;
         break;
@@ -1182,7 +1228,17 @@ void FlutterMediaStream::SelectAudioInput(
     std::cout << "[FlutterWebRTC]   in NOT matched, falling back to "
                  "system default"
               << std::endl;
-    result->Success();
+    EncodableMap info;
+    info[EncodableValue("matched")] = EncodableValue(false);
+    info[EncodableValue("matchedBy")] = EncodableValue("not_found");
+    info[EncodableValue("appliedIndex")] = EncodableValue(-1);
+    info[EncodableValue("rc")] = EncodableValue(-1);
+    info[EncodableValue("deviceId")] = EncodableValue(device_id);
+    info[EncodableValue("label")] = EncodableValue(label);
+    info[EncodableValue("forceRequested")] = EncodableValue(force_try_set);
+    info[EncodableValue("remark")] = EncodableValue(
+        "NOT matched in ADM enumeration — falling back to system default");
+    result->Success(EncodableValue(info));
     return;
   }
   // force_try_set пока no-op — нет публичного API для restart capture
@@ -1197,7 +1253,17 @@ void FlutterMediaStream::SelectAudioInput(
   std::cout << "[FlutterWebRTC] SetRecordingDevice(" << matched_index
             << ") rc=" << rc << " (force=" << force_try_set << ")"
             << std::endl;
-  result->Success();
+  EncodableMap info;
+  info[EncodableValue("matched")] = EncodableValue(true);
+  info[EncodableValue("matchedBy")] = EncodableValue(matched_by);
+  info[EncodableValue("appliedIndex")] = EncodableValue(
+      static_cast<int64_t>(matched_index));
+  info[EncodableValue("rc")] = EncodableValue(static_cast<int64_t>(rc));
+  info[EncodableValue("deviceId")] = EncodableValue(device_id);
+  info[EncodableValue("label")] = EncodableValue(label);
+  info[EncodableValue("forceRequested")] = EncodableValue(force_try_set);
+  info[EncodableValue("remark")] = EncodableValue("");
+  result->Success(EncodableValue(info));
 }
 
 void FlutterMediaStream::MediaStreamGetTracks(
