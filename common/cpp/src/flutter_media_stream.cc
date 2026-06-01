@@ -1132,14 +1132,22 @@ void FlutterMediaStream::SelectAudioOutput(
     result->Success(EncodableValue(info));
     return;
   }
-  // force_try_set пока не имеет специального обработчика на Win —
-  // публичный `RTCAudioDevice` C++ API (libwebrtc v1.4.0) НЕ
-  // экспортирует `StopPlayout/InitPlayout/StartPlayout`, поэтому
-  // явный hot-swap-цикл во время playout=1 невозможен через текущий
-  // API. SetPlayoutDevice применяется немедленно если ADM idle, или
-  // lazy на следующий InitPlayout если уже работает. См.
-  // `todo_2026_05_17_windows_audio_hot_swap.md` для плана.
-  const int32_t rc = base_->audio_device_->SetPlayoutDevice(matched_index);
+  // force_try_set на Win: если playout уже активен (звонок идёт),
+  // SetPlayoutDevice с тем же индексом — no-op, ADM не перезапускает
+  // pipeline. После hold→sendonly→unhold→sendrecv playout "засыпает"
+  // (in-rtp идёт, но PCM не проигрывается). Double-switch будит его:
+  // переключаемся на индекс 0 → обратно на matched_index. Это НЕ
+  // плодит MF worker threads (не создаёт новый IAudioClient), только
+  // заставляет ADM переинициализировать существующий playout.
+  int32_t rc;
+  if (force_try_set && playout_devices > 1) {
+    std::cout << "[FlutterWebRTC] SetPlayoutDevice forceTry: double-switch via index 0"
+              << std::endl;
+    base_->audio_device_->SetPlayoutDevice(0);
+    rc = base_->audio_device_->SetPlayoutDevice(matched_index);
+  } else {
+    rc = base_->audio_device_->SetPlayoutDevice(matched_index);
+  }
   std::cout << "[FlutterWebRTC] SetPlayoutDevice(" << matched_index
             << ") rc=" << rc << " (force=" << force_try_set << ")"
             << std::endl;
