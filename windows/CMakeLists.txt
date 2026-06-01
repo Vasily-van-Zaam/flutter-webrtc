@@ -6,15 +6,18 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
   cmake_policy(SET CMP0135 NEW)
 endif()
 
-# Add the libwebrtc dependency
+# Add the libwebrtc dependency (headers only — we link statically)
 include("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/CMakeLists.txt")
 
 # This value is used when generating builds using this plugin, so it must
 # not be changed
 set(PLUGIN_NAME "flutter_webrtc_plugin")
 
-add_definitions(-DLIB_WEBRTC_API_DLL)
+# Статическая линковка webrtc.lib с CoreAudio2 WASAPI ADM.
+# LIB_WEBRTC_API_DLL УБРАН — больше не тянем libwebrtc.dll.
 add_definitions(-DRTC_DESKTOP_DEVICE)
+add_definitions(-DWEBRTC_WIN)
+add_definitions(-DWEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE)
 
 add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_common.cc"
@@ -32,6 +35,38 @@ add_library(${PLUGIN_NAME} SHARED
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
   "audio_session_naming.cc"
+  # webrtc-sdk: compile SDK wrapper inside plugin (no separate DLL)
+  "../third_party/libwebrtc/webrtc-sdk/src/libwebrtc.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/helper.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_peerconnection_factory_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_peerconnection_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_media_stream_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_audio_device_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_audio_source_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_audio_track_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_audio_processing_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_data_channel_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_dtmf_sender_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_ice_candidate_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_mediaconstraints_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_rtp_capabilities_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_rtp_receiver_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_rtp_sender_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_rtp_transceiver_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_rtp_parameters_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_session_description_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_logging.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_video_device_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_video_source_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_video_track_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_video_frame_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_video_sink_adapter.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_desktop_device_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_desktop_capturer_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_desktop_media_list_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_frame_cryptor_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_data_packet_cryptor_impl.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/internal/custom_audio_transport_impl.cc"
 )
 
 include_directories(
@@ -39,6 +74,12 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
+  # webrtc-sdk headers
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src/base"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src/internal"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src/desktop"
 )
 
 apply_standard_settings(${PLUGIN_NAME})
@@ -50,32 +91,23 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
 )
+
+# Статическая линковка кастомного webrtc.lib (CoreAudio2 WASAPI ADM)
 target_link_libraries(${PLUGIN_NAME} PRIVATE 
   flutter
   flutter_wrapper_plugin
-  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll.lib"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/webrtc.lib"
+  ws2_32
+  secur32
+  winmm
+  dmoguids
+  wmcodecdspuuid
+  msdmo
+  strmiids
 )
 
-# List of absolute paths to libraries that should be bundled with the plugin.
-#
-# ВАЖНО: резолвим путь через `get_filename_component(... ABSOLUTE)`,
-# чтобы получить нормализованный canonical путь напрямую в pub-cache
-# (без `..` через symlink). Дефолтный шаблон писал
-# `${CMAKE_CURRENT_SOURCE_DIR}/../third_party/...`, и при подмешивании
-# в `PLUGIN_BUNDLED_LIBRARIES` основного проекта это разворачивается в
-# `.../plugin_symlinks/flutter_webrtc/windows/../third_party/.../
-# libwebrtc.dll`. CMake `file(INSTALL FILES ...)` пытается резолвить
-# `..` через symlink — на Windows это даёт false-negative и install
-# падает с «file INSTALL cannot find ...libwebrtc.dll».
-#
-# Через `ABSOLUTE` получаем настоящий путь в pub-cache (например
-# `C:/Users/<user>/AppData/Local/Pub/Cache/git/flutter-webrtc-<hash>/
-# third_party/libwebrtc/lib/win64/libwebrtc.dll`), `..` и symlink
-# из install destination'а исчезают, копирование работает.
-get_filename_component(_libwebrtc_dll_abs
-  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/lib/win64/libwebrtc.dll"
-  ABSOLUTE)
+# No bundled DLL — statically linked
 set(flutter_webrtc_bundled_libraries
-  "${_libwebrtc_dll_abs}"
+  ""
   PARENT_SCOPE
 )
