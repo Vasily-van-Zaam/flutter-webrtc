@@ -1,6 +1,10 @@
 
 # Changelog
 
+[Unreleased]
+
+* [Windows/Linux] fix: Map echoCancellation/noiseSuppression/autoGainControl constraints to RTCAudioOptions so software AEC/NS/AGC can actually be toggled from Dart (#XXXX).
+
 [1.2.1] - 2025-11-21
 
 * [Linux] fix: Enable software AEC/NS/AGC for linux.
