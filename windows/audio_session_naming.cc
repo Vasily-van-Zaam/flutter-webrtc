@@ -20,7 +20,9 @@
 // можно тоже, но придётся CoInitializeEx — мы не лезем чтобы не
 // конфликтовать с тем что уже инициализировано Flutter'ом.
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #include <mmdeviceapi.h>

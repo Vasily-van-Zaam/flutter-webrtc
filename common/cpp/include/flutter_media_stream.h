@@ -54,6 +54,10 @@ class FlutterMediaStream {
                         bool force_try_set,
                         std::unique_ptr<MethodResultProxy> result);
 
+  // Переприменяет сохранённое в AudioDeviceImpl устройство playout.
+  // Вызывать при unhold / device-change для предотвращения сброса на default.
+  void ReapplyAudioOutput(std::unique_ptr<MethodResultProxy> result);
+
   void MediaStreamGetTracks(const std::string& stream_id,
                             std::unique_ptr<MethodResultProxy> result);
 
@@ -72,6 +76,13 @@ class FlutterMediaStream {
   void CreateLocalMediaStream(std::unique_ptr<MethodResultProxy> result);
 
   void OnDeviceChange();
+
+  // Возвращает список аудиоустройств напрямую из ADM (без Windows Multimedia
+  // API enumerate — не триггерит BT profile switching как у ЯТМ).
+  // Формат: [{index, name, guid, kind: "audioinput"|"audiooutput"}, ...]
+  // kind=audiooutput: из PlayoutDevices/PlayoutDeviceName
+  // kind=audioinput:  из RecordingDevices/RecordingDeviceName
+  void GetAdmAudioDevices(std::unique_ptr<MethodResultProxy> result);
 
   // Возвращает в Dart-сторону `{audioinput: N, audiooutput: M}` — где N/M
   // это число endpoint'ов в **DEVICE_STATE_ACTIVE**. В отличие от

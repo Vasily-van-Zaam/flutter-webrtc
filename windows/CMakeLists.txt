@@ -15,6 +15,11 @@ set(PLUGIN_NAME "flutter_webrtc_plugin")
 
 add_definitions(-DLIB_WEBRTC_API_DLL)
 add_definitions(-DRTC_DESKTOP_DEVICE)
+add_definitions(-DWEBRTC_WIN)
+add_definitions(-DNOMINMAX)
+add_definitions(-DWIN32_LEAN_AND_MEAN)
+add_definitions(/wd4127)
+add_definitions(/wd4244)
 
 add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_common.cc"
@@ -32,6 +37,7 @@ add_library(${PLUGIN_NAME} SHARED
   "flutter_webrtc_plugin.cc"
   "task_runner_windows.cc"
   "audio_session_naming.cc"
+  "../third_party/libwebrtc/webrtc-sdk/src/rtc_audio_device_impl.cc"
 )
 
 include_directories(
@@ -39,6 +45,9 @@ include_directories(
   "${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/svpng"
   "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libwebrtc/webrtc-sdk/src"
+  "C:/PROJECTS/webrtc_build/src"
+  "C:/PROJECTS/webrtc_build/src/third_party/abseil-cpp"
 )
 
 apply_standard_settings(${PLUGIN_NAME})

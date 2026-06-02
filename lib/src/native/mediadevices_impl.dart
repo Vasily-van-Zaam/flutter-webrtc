@@ -99,6 +99,27 @@ class MediaDeviceNative extends MediaDevices {
         .toList();
   }
 
+  /// Возвращает список аудиоустройств напрямую из ADM (без Windows
+  /// Multimedia API enumerate — не триггерит BT profile switching как у ЯТМ).
+  ///
+  /// Возвращает List<Map<String, dynamic>>:
+  ///   [{index: 0, name: "...", guid: "{...}", kind: "audiooutput"}, ...]
+  ///
+  /// kind = "audiooutput" | "audioinput".
+  /// guid = тот же формат что использует selectAudioOutput для поиска индекса.
+  static Future<List<Map<String, dynamic>>> getAdmAudioDevices() async {
+    try {
+      final result = await WebRTC.invokeMethod('getAdmAudioDevices', {});
+      if (result is List) {
+        return result.cast<Map<String, dynamic>>();
+      }
+      return [];
+    } on PlatformException catch (e) {
+      print('[ADM] getAdmAudioDevices failed: $e');
+      return [];
+    }
+  }
+
   @override
   Future<MediaDeviceInfo> selectAudioOutput(
       [AudioOutputOptions? options]) async {

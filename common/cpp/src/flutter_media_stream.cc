@@ -4,6 +4,9 @@
 
 #include "flutter_utf8_sanitize.h"
 
+// AudioDeviceImpl — для ReapplyAudioOutput / GetAdmAudioDevices
+#include "rtc_audio_device_impl.h"
+
 #ifdef _WIN32
 // Windows Core Audio API — гарантированно видит ВСЕ системные
 // audio-устройства, ту же информацию что показывает Volume Mixer и
@@ -1148,6 +1151,7 @@ void FlutterMediaStream::SelectAudioOutput(
   } else {
     rc = base_->audio_device_->SetPlayoutDevice(matched_index);
   }
+
   std::cout << "[FlutterWebRTC] SetPlayoutDevice(" << matched_index
             << ") rc=" << rc << " (force=" << force_try_set << ")"
             << std::endl;
@@ -1411,4 +1415,63 @@ void FlutterMediaStream::MediaStreamTrackDispose(
   base_->RemoveMediaTrackForId(track_id);
   result->Success();
 }
+
+void FlutterMediaStream::ReapplyAudioOutput(
+    std::unique_ptr<MethodResultProxy> result) {
+  std::cout << "[FlutterWebRTC] reapplyAudioOutput called"
+            << " — reapplying saved playout device via AudioDeviceImpl"
+            << std::endl;
+  auto* dev = static_cast<libwebrtc::AudioDeviceImpl*>(
+      base_->audio_device_.get());
+  bool matched = dev->SaveAndApplyPlayoutDevice(
+      dev->saved_playout_device_id(), true /* force_try_set */);
+  EncodableMap info;
+  info[EncodableValue("reapplied")] = EncodableValue(matched);
+  info[EncodableValue("deviceId")] = EncodableValue(dev->saved_playout_device_id());
+  result->Success(EncodableValue(info));
+}
+
+void FlutterMediaStream::GetAdmAudioDevices(
+    std::unique_ptr<MethodResultProxy> result) {
+  auto* dev = static_cast<libwebrtc::AudioDeviceImpl*>(
+      base_->audio_device_.get());
+
+  EncodableList devices;
+  char deviceName[256];
+  char deviceGuid[256];
+
+  // Playout (output) devices
+  int16_t playout_count = dev->PlayoutDevices();
+  for (int16_t i = 0; i < playout_count; i++) {
+    dev->PlayoutDeviceName(i, deviceName, deviceGuid);
+    EncodableMap dev_info;
+    dev_info[EncodableValue("index")] = EncodableValue(i);
+    dev_info[EncodableValue("name")] = EncodableValue(
+        deviceName != nullptr ? std::string(deviceName) : "");
+    dev_info[EncodableValue("guid")] = EncodableValue(
+        deviceGuid != nullptr ? std::string(deviceGuid) : "");
+    dev_info[EncodableValue("kind")] = EncodableValue("audiooutput");
+    devices.push_back(EncodableValue(dev_info));
+  }
+
+  // Recording (input) devices
+  int16_t recording_count = dev->RecordingDevices();
+  for (int16_t i = 0; i < recording_count; i++) {
+    dev->RecordingDeviceName(i, deviceName, deviceGuid);
+    EncodableMap dev_info;
+    dev_info[EncodableValue("index")] = EncodableValue(i);
+    dev_info[EncodableValue("name")] = EncodableValue(
+        deviceName != nullptr ? std::string(deviceName) : "");
+    dev_info[EncodableValue("guid")] = EncodableValue(
+        deviceGuid != nullptr ? std::string(deviceGuid) : "");
+    dev_info[EncodableValue("kind")] = EncodableValue("audioinput");
+    devices.push_back(EncodableValue(dev_info));
+  }
+
+  std::cout << "[FlutterWebRTC] getAdmAudioDevices: outputs=" << playout_count
+            << " inputs=" << recording_count << std::endl;
+
+  result->Success(EncodableValue(devices));
+}
+
 }  // namespace flutter_webrtc_plugin

@@ -138,6 +138,10 @@ void FlutterWebRTC::HandleMethodCall(
     const std::string label = findString(params, "label");
     const bool forceTrySet = findBoolean(params, "forceTrySet");
     SelectAudioOutput(deviceId, label, forceTrySet, std::move(result));
+  } else if (method_call.method_name().compare("reapplyAudioOutput") == 0) {
+    ReapplyAudioOutput(std::move(result));
+  } else if (method_call.method_name().compare("getAdmAudioDevices") == 0) {
+    GetAdmAudioDevices(std::move(result));
   } else if (method_call.method_name().compare("mediaStreamGetTracks") == 0) {
     if (!method_call.arguments()) {
       result->Error("Bad Arguments", "Null constraints arguments received");
