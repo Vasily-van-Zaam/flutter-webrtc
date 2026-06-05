@@ -1,5 +1,7 @@
 #include "flutter_media_stream.h"
 
+#include <iostream>
+
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 720
 #define DEFAULT_FPS 30
@@ -146,6 +148,17 @@ std::string getDeviceIdConstraint(const EncodableMap& mediaConstraints) {
   return "";
 }
 
+void logNativeAudioOptions(const RTCAudioOptions& options) {
+  std::cout << "[AudioConstraints] native GetUserAudio "
+            << "AGC=" << (options.auto_gain_control ? "true" : "false")
+            << " EchoCancellation="
+            << (options.echo_cancellation ? "true" : "false")
+            << " NoiseSuppression="
+            << (options.noise_suppression ? "true" : "false")
+            << " HighpassFilter="
+            << (options.highpass_filter ? "true" : "false") << std::endl;
+}
+
 void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
                                       scoped_refptr<RTCMediaStream> stream,
                                       EncodableMap& params) {
@@ -221,6 +234,7 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
       }
     }
 
+    logNativeAudioOptions(audio_options);
     scoped_refptr<RTCAudioSource> source = base_->factory_->CreateAudioSource(
         "audio_input", RTCAudioSource::SourceType::kMicrophone, audio_options);
     std::string uuid = base_->GenerateUUID();
