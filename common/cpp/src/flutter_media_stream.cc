@@ -154,7 +154,7 @@ std::string getDeviceIdConstraint(const EncodableMap& mediaConstraints) {
 }
 
 void logNativeAudioOptions(const RTCAudioOptions& options) {
-  std::cout << "[AudioConstraints] native GetUserAudio "
+  std::cout << "[AudioConstraints] flutter_webrtc=v1.2.1 native GetUserAudio "
             << "AGC=" << (options.auto_gain_control ? "true" : "false")
             << " EchoCancellation="
             << (options.echo_cancellation ? "true" : "false")
